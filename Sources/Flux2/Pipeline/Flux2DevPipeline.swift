@@ -268,4 +268,45 @@ public final class Flux2DevPipeline {
     )
   }
 
+  public func generateStream(
+    prompts: [String],
+    height: Int,
+    width: Int,
+    numInferenceSteps: Int,
+    numImagesPerPrompt: Int = 1,
+    latents: MLXArray? = nil,
+    guidanceScale: Float = 4.0,
+    modelTimestepScale: Float = 0.001,
+    images: [MLXArray]? = nil,
+    imageIdScale: Int = 10,
+    maxLength: Int? = nil
+  ) -> AsyncStream<GenerationEvent> {
+    AsyncStream { continuation in
+      do {
+        let output = try generate(
+          prompts: prompts,
+          height: height,
+          width: width,
+          numInferenceSteps: numInferenceSteps,
+          numImagesPerPrompt: numImagesPerPrompt,
+          latents: latents,
+          guidanceScale: guidanceScale,
+          modelTimestepScale: modelTimestepScale,
+          images: images,
+          imageIdScale: imageIdScale,
+          maxLength: maxLength,
+          progressHandler: { progress in
+            continuation.yield(.progress(progress))
+          }
+        )
+        continuation.yield(.completed(Flux2PipelineOutput(
+          packedLatents: output.packedLatents,
+          decoded: output.decoded
+        )))
+        continuation.finish()
+      } catch {
+        continuation.finish()
+      }
+    }
+  }
 }

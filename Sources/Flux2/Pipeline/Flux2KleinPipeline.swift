@@ -451,6 +451,46 @@ public final class Flux2KleinPipeline {
     return noisePredAll[0..., 0..<tokenCount, 0...]
   }
 
+  public func generateStream(
+    prompts: [String],
+    height: Int,
+    width: Int,
+    numInferenceSteps: Int,
+    numImagesPerPrompt: Int = 1,
+    latents: MLXArray? = nil,
+    guidanceScale: Float = 1.0,
+    modelTimestepScale: Float = 0.001,
+    images: [MLXArray]? = nil,
+    imageIdScale: Int = 10
+  ) -> AsyncStream<GenerationEvent> {
+    AsyncStream { continuation in
+      do {
+        let output = try generate(
+          prompts: prompts,
+          height: height,
+          width: width,
+          numInferenceSteps: numInferenceSteps,
+          numImagesPerPrompt: numImagesPerPrompt,
+          latents: latents,
+          guidanceScale: guidanceScale,
+          modelTimestepScale: modelTimestepScale,
+          images: images,
+          imageIdScale: imageIdScale,
+          progressHandler: { progress in
+            continuation.yield(.progress(progress))
+          }
+        )
+        continuation.yield(.completed(Flux2PipelineOutput(
+          packedLatents: output.packedLatents,
+          decoded: output.decoded
+        )))
+        continuation.finish()
+      } catch {
+        continuation.finish()
+      }
+    }
+  }
+
   private struct ModelIndex: Decodable {
     let isDistilled: Bool?
 

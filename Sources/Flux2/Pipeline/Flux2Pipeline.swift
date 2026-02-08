@@ -2,7 +2,7 @@ import Foundation
 @preconcurrency import MLX
 import MLXNN
 
-public struct Flux2PipelineOutput {
+public struct Flux2PipelineOutput: Sendable {
   public let packedLatents: MLXArray
   public let decoded: MLXArray
 }
@@ -14,6 +14,11 @@ public struct DenoiseProgress: Sendable {
 }
 
 public typealias DenoiseProgressHandler = @Sendable (DenoiseProgress) -> Void
+
+public enum GenerationEvent: Sendable {
+  case progress(DenoiseProgress)
+  case completed(Flux2PipelineOutput)
+}
 
 public final class Flux2Pipeline {
   public let transformer: Flux2Transformer2DModel
