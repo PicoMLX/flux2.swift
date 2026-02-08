@@ -141,6 +141,57 @@ This reproduces the “prompt upsampling” workflow from the upstream FLUX.2 do
   --output temp/dev_i2i_upsample.png
 ```
 
+### Wired GPU memory
+
+On Apple Silicon, the OS can page GPU memory to disk under memory pressure, causing latency spikes during inference. The `--wired-memory` flag uses Metal's `MTLResidencySet` to pin GPU allocations in physical RAM, preventing paging.
+
+```bash
+# Pin up to 12 GB of GPU memory
+./flux2-cli.macos.arm64/flux2-cli generate \
+  --model black-forest-labs/FLUX.2-klein-4B \
+  --prompt "A cat" \
+  --wired-memory 12884901888
+
+# Pin the device maximum (uses all available GPU memory)
+./flux2-cli.macos.arm64/flux2-cli generate \
+  --model black-forest-labs/FLUX.2-klein-4B \
+  --prompt "A cat" \
+  --wired-memory max
+```
+
+**Timing:** The wired limit is applied *after* the model is loaded into GPU memory. This works because MLX's wiring is retroactive — when the limit is set, it immediately pins existing allocations (not just future ones). In the library API, `wiredMemoryLimit` wraps the denoise + decode phase, which is where sustained GPU throughput matters most.
+
+**How much memory to wire:** The main cost is model weights. A rough guide:
+
+| Model | bf16 | q8_64 |
+| --- | --- | --- |
+| FLUX.2-klein-4B | ~8 GB | ~5 GB |
+| FLUX.2-klein-9B | ~18 GB | ~10 GB |
+| FLUX.2-dev | ~24 GB | ~13 GB |
+
+On top of weights, add ~1-2 GB for intermediate activations, latent buffers, and the VAE decode pass. So for klein-4B at q8, `--wired-memory 8589934592` (8 GB) is a reasonable starting point. When in doubt, use `--wired-memory max` to let MLX pin as much as the device allows.
+
+You can check your device's maximum with:
+
+```swift
+import MLX
+print(GPU.deviceInfo().maxRecommendedWorkingSetSize) // bytes
+```
+
+**Library API:** The `wiredMemoryLimit` parameter is available on all pipeline `generate()` and `generateTokens()` methods:
+
+```swift
+let output = try pipeline.generate(
+  prompts: ["A cat"],
+  height: 512,
+  width: 512,
+  numInferenceSteps: 4,
+  wiredMemoryLimit: 8_589_934_592  // 8 GB, or nil to disable (default)
+)
+```
+
+**Requirements:** macOS 15+ (Sequoia) or iOS 18+, Metal GPU Family 3.
+
 ## Examples
 
 The `examples/` folder contains a few straight-from-the-CLI renders to showcase current fidelity (including 8bit quantized model created by `flux2-cli quantize`):
