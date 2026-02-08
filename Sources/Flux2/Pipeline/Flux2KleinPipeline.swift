@@ -348,7 +348,8 @@ public final class Flux2KleinPipeline {
     negativeEncoding: Flux2PromptEncoding?,
     guidanceScale: Float,
     modelTimestepScale: Float,
-    imageConditioning: (latents: MLXArray, ids: MLXArray)?
+    imageConditioning: (latents: MLXArray, ids: MLXArray)?,
+    evalInterval: Int = 5
   ) throws -> MLXArray {
     let stepValues = scheduler.timestepsValues
     let batch = latents.dim(0)
@@ -395,6 +396,10 @@ public final class Flux2KleinPipeline {
         sample: current
       ).prevSample
       current = prev
+
+      if evalInterval > 0, (stepIndex + 1) % evalInterval == 0 {
+        MLX.eval(current)
+      }
     }
 
     return current

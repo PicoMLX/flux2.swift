@@ -33,7 +33,8 @@ public final class Flux2Pipeline {
     txtIds: MLXArray,
     imageConditioning: (latents: MLXArray, ids: MLXArray)? = nil,
     guidance: MLXArray? = nil,
-    modelTimestepScale: Float = 0.001
+    modelTimestepScale: Float = 0.001,
+    evalInterval: Int = 5
   ) throws -> MLXArray {
     let stepValues = timestepValues ?? scheduler.timestepsValues
     let batch = latents.dim(0)
@@ -63,6 +64,10 @@ public final class Flux2Pipeline {
         modelTimestepScale: modelTimestepScale
       )
       current = output.prevLatents
+
+      if evalInterval > 0, (stepIndex + 1) % evalInterval == 0 {
+        MLX.eval(current)
+      }
     }
     return current
   }
@@ -84,7 +89,8 @@ public final class Flux2Pipeline {
     txtIds: MLXArray,
     imageConditioning: (latents: MLXArray, ids: MLXArray)? = nil,
     guidance: MLXArray? = nil,
-    modelTimestepScale: Float = 0.001
+    modelTimestepScale: Float = 0.001,
+    evalInterval: Int = 5
   ) throws -> Flux2PipelineOutput {
     let packed = try denoiseLoop(
       latents: latents,
@@ -94,7 +100,8 @@ public final class Flux2Pipeline {
       txtIds: txtIds,
       imageConditioning: imageConditioning,
       guidance: guidance,
-      modelTimestepScale: modelTimestepScale
+      modelTimestepScale: modelTimestepScale,
+      evalInterval: evalInterval
     )
     let decoded = try decodeLatents(packed, latentIds: latentIds)
     MLX.eval(packed, decoded)

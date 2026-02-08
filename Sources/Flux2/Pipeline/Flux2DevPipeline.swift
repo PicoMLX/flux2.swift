@@ -232,7 +232,8 @@ public final class Flux2DevPipeline {
       txtIds: promptEncoding.textIds,
       imageConditioning: preparedImages.map { (latents: $0.latents, ids: $0.ids) },
       guidance: guidance,
-      modelTimestepScale: modelTimestepScale
+      modelTimestepScale: modelTimestepScale,
+      evalInterval: 5
     )
 
     let decoded = try pipeline.decodeLatents(denoised, latentIds: prepared.ids)
