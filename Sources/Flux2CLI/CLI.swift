@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import Flux2
+import MLX
 
 enum CLIError: Error, LocalizedError {
   case missingArgument(String)
@@ -281,6 +282,12 @@ struct CLI: AsyncParsableCommand {
     @Option(name: .customLong("metrics-json"), help: "Optional path to write JSON timing metrics for this run.")
     var metricsJSONPath: String?
 
+    @Option(name: .customLong("wired-memory"), help: """
+      Wired GPU memory limit in bytes, or "max" to use the device maximum. \
+      Pins model weights in GPU memory to avoid paging. Default: disabled.
+      """)
+    var wiredMemory: String?
+
     mutating func validate() throws {
       if prompt == nil {
         throw ValidationError("Missing required option: --prompt")
@@ -314,9 +321,18 @@ struct CLI: AsyncParsableCommand {
           width: width,
           steps: steps,
           outputPath: outputPath,
-          metricsJSONPath: metricsJSONPath
+          metricsJSONPath: metricsJSONPath,
+          wiredMemoryLimit: CLI.parseWiredMemoryLimit(wiredMemory)
         )
       )
     }
+  }
+
+  static func parseWiredMemoryLimit(_ value: String?) -> Int? {
+    guard let value, !value.isEmpty else { return nil }
+    if value.lowercased() == "max" {
+      return Int(GPU.deviceInfo().maxRecommendedWorkingSetSize)
+    }
+    return Int(value)
   }
 }

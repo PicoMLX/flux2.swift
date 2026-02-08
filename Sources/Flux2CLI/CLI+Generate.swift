@@ -29,6 +29,7 @@ extension CLI {
 
     let outputPath: String
     let metricsJSONPath: String?
+    let wiredMemoryLimit: Int?
   }
 
   private struct GenerateRunMetrics: Codable {
@@ -198,65 +199,79 @@ extension CLI {
     let dtype = resolvedDType
 
     try Device.withDefaultDevice(.gpu) {
-      let clock = ContinuousClock()
+      var localTimes: [String: Double] = [:]
 
-      guard let prompt = options.prompt else {
-        throw CLIError.missingArgument("--prompt")
-      }
+      let body = { () throws -> Void in
+        let clock = ContinuousClock()
 
-      var height = options.height
-      var width = options.width
-      let steps = options.steps ?? 50
-      let guidanceScale = options.guidanceScale
-      let imageIdScale = options.imageIdScale
-      let imageSpecs = options.imageSpecs
-      let conditioning: [ConditioningImage]
-      if imageSpecs.isEmpty {
-        conditioning = []
-      } else {
-        let loadStart = clock.now
-        conditioning = try imageSpecs.map { try loadConditioningImage(spec: $0) }
-        stageTimes["conditioning_load_s"] = seconds(clock.now - loadStart)
-        height = height ?? conditioning.first?.height
-        width = width ?? conditioning.first?.width
-      }
-      let conditioningImages = conditioning.isEmpty ? nil : conditioning.map(\.array)
-
-      let initStart = clock.now
-      let pipeline = try Flux2KleinPipeline(
-        snapshot: snapshotURL,
-        dtype: dtype,
-        maxLengthOverride: options.maxLength,
-        loadTokenizer: true
-      )
-      stageTimes["pipeline_init_s"] = seconds(clock.now - initStart)
-
-      if pipeline.isDistilled && guidanceScale > 1.0 {
-        print("[warn] guidance scale \(guidanceScale) is ignored for step-wise distilled models.")
-      }
-
-      let resolvedHeight = height ?? 512
-      let resolvedWidth = width ?? 512
-
-      let genStart = clock.now
-      let output = try pipeline.generate(
-        prompts: [prompt],
-        height: resolvedHeight,
-        width: resolvedWidth,
-        numInferenceSteps: steps,
-        guidanceScale: guidanceScale,
-        images: conditioningImages,
-        imageIdScale: imageIdScale,
-        progressHandler: { progress in
-          print("[step \(progress.step)/\(progress.totalSteps)]")
+        guard let prompt = options.prompt else {
+          throw CLIError.missingArgument("--prompt")
         }
-      )
-      stageTimes["pipeline_generate_s"] = seconds(clock.now - genStart)
 
-      let writeStart = clock.now
-      let outputURL = resolveOutputURL(options.outputPath)
-      try writeImage(image: output.decoded, url: outputURL)
-      stageTimes["write_image_s"] = seconds(clock.now - writeStart)
+        var height = options.height
+        var width = options.width
+        let steps = options.steps ?? 50
+        let guidanceScale = options.guidanceScale
+        let imageIdScale = options.imageIdScale
+        let imageSpecs = options.imageSpecs
+        let conditioning: [ConditioningImage]
+        if imageSpecs.isEmpty {
+          conditioning = []
+        } else {
+          let loadStart = clock.now
+          conditioning = try imageSpecs.map { try loadConditioningImage(spec: $0) }
+          localTimes["conditioning_load_s"] = seconds(clock.now - loadStart)
+          height = height ?? conditioning.first?.height
+          width = width ?? conditioning.first?.width
+        }
+        let conditioningImages = conditioning.isEmpty ? nil : conditioning.map(\.array)
+
+        let initStart = clock.now
+        let pipeline = try Flux2KleinPipeline(
+          snapshot: snapshotURL,
+          dtype: dtype,
+          maxLengthOverride: options.maxLength,
+          loadTokenizer: true
+        )
+        localTimes["pipeline_init_s"] = seconds(clock.now - initStart)
+
+        if pipeline.isDistilled && guidanceScale > 1.0 {
+          print("[warn] guidance scale \(guidanceScale) is ignored for step-wise distilled models.")
+        }
+
+        let resolvedHeight = height ?? 512
+        let resolvedWidth = width ?? 512
+
+        let genStart = clock.now
+        let output = try pipeline.generate(
+          prompts: [prompt],
+          height: resolvedHeight,
+          width: resolvedWidth,
+          numInferenceSteps: steps,
+          guidanceScale: guidanceScale,
+          images: conditioningImages,
+          imageIdScale: imageIdScale,
+          progressHandler: { progress in
+            print("[step \(progress.step)/\(progress.totalSteps)]")
+          }
+        )
+        localTimes["pipeline_generate_s"] = seconds(clock.now - genStart)
+
+        let writeStart = clock.now
+        let outputURL = resolveOutputURL(options.outputPath)
+        try writeImage(image: output.decoded, url: outputURL)
+        localTimes["write_image_s"] = seconds(clock.now - writeStart)
+      }
+
+      if let limit = options.wiredMemoryLimit {
+        try Memory.withWiredLimit(limit, body)
+      } else {
+        try body()
+      }
+
+      for (key, value) in localTimes {
+        stageTimes[key] = value
+      }
     }
   }
 
@@ -276,104 +291,118 @@ extension CLI {
     let dtype = resolvedDType
 
     try Device.withDefaultDevice(.gpu) {
-      let clock = ContinuousClock()
+      var localTimes: [String: Double] = [:]
 
-      guard let prompt = options.prompt else {
-        throw CLIError.missingArgument("--prompt")
-      }
+      let body = { () throws -> Void in
+        let clock = ContinuousClock()
 
-      var height = options.height
-      var width = options.width
-      let steps = options.steps ?? 50
-      let guidanceScale = options.guidanceScale
-      let imageIdScale = options.imageIdScale
-      let maxLength = options.maxLength
-      let imageSpecs = options.imageSpecs
-      let conditioning: [ConditioningImage]
-      if imageSpecs.isEmpty {
-        conditioning = []
-      } else {
-        let loadStart = clock.now
-        conditioning = try imageSpecs.map { try loadConditioningImage(spec: $0) }
-        stageTimes["conditioning_load_s"] = seconds(clock.now - loadStart)
-        height = height ?? conditioning.first?.height
-        width = width ?? conditioning.first?.width
-      }
-      let conditioningImages = conditioning.isEmpty ? nil : conditioning.map(\.array)
-      let upsampleImages = conditioning.isEmpty ? nil : conditioning.map(\.original)
-
-      let initStart = clock.now
-      let pipeline = try Flux2DevPipeline(
-        snapshot: snapshotURL,
-        dtype: dtype,
-        maxLengthOverride: maxLength,
-        loadProcessor: true
-      )
-      stageTimes["pipeline_init_s"] = seconds(clock.now - initStart)
-
-      let resolvedHeight = height ?? 512
-      let resolvedWidth = width ?? 512
-
-      let resolvedPrompt: String
-      if options.upsamplePrompt == .local {
-        var upsampleProcessor = try Flux2PixtralProcessor.load(from: snapshotURL, maxLengthOverride: 2048)
-        if let upsampleImages, !upsampleImages.isEmpty, let multimodal = upsampleProcessor.multimodal {
-          let baseLongestEdge = multimodal.imageProcessor.configuration.longestEdge
-          let cappedLongestEdge = min(baseLongestEdge, 768)
-          if cappedLongestEdge < baseLongestEdge {
-            upsampleProcessor = try upsampleProcessor.withImageLongestEdge(cappedLongestEdge)
-          }
+        guard let prompt = options.prompt else {
+          throw CLIError.missingArgument("--prompt")
         }
-        guard let promptEncoder = pipeline.promptEncoder else {
-          throw CLIError.invalidOption("Prompt encoder unavailable (pipeline already used).")
+
+        var height = options.height
+        var width = options.width
+        let steps = options.steps ?? 50
+        let guidanceScale = options.guidanceScale
+        let imageIdScale = options.imageIdScale
+        let maxLength = options.maxLength
+        let imageSpecs = options.imageSpecs
+        let conditioning: [ConditioningImage]
+        if imageSpecs.isEmpty {
+          conditioning = []
+        } else {
+          let loadStart = clock.now
+          conditioning = try imageSpecs.map { try loadConditioningImage(spec: $0) }
+          localTimes["conditioning_load_s"] = seconds(clock.now - loadStart)
+          height = height ?? conditioning.first?.height
+          width = width ?? conditioning.first?.width
         }
-        let upsampler = Flux2DevPromptUpsampler(
-          textEncoder: promptEncoder.textEncoder,
-          processor: upsampleProcessor
+        let conditioningImages = conditioning.isEmpty ? nil : conditioning.map(\.array)
+        let upsampleImages = conditioning.isEmpty ? nil : conditioning.map(\.original)
+
+        let initStart = clock.now
+        let pipeline = try Flux2DevPipeline(
+          snapshot: snapshotURL,
+          dtype: dtype,
+          maxLengthOverride: maxLength,
+          loadProcessor: true
         )
+        localTimes["pipeline_init_s"] = seconds(clock.now - initStart)
 
-        let upsampleStart = clock.now
-        let upsampled = try upsampler.upsample(
-          prompts: [prompt],
-          images: upsampleImages,
-          temperature: 0.15,
-          maxNewTokens: 512,
-          seed: options.seed.map(UInt64.init),
-          prefillChunkSize: 256,
-          evaluationPolicy: .deferred,
-          onError: { _, error in
-            print("[warn] prompt upsampling failed: \(error)")
+        let resolvedHeight = height ?? 512
+        let resolvedWidth = width ?? 512
+
+        let resolvedPrompt: String
+        if options.upsamplePrompt == .local {
+          var upsampleProcessor = try Flux2PixtralProcessor.load(from: snapshotURL, maxLengthOverride: 2048)
+          if let upsampleImages, !upsampleImages.isEmpty, let multimodal = upsampleProcessor.multimodal {
+            let baseLongestEdge = multimodal.imageProcessor.configuration.longestEdge
+            let cappedLongestEdge = min(baseLongestEdge, 768)
+            if cappedLongestEdge < baseLongestEdge {
+              upsampleProcessor = try upsampleProcessor.withImageLongestEdge(cappedLongestEdge)
+            }
+          }
+          guard let promptEncoder = pipeline.promptEncoder else {
+            throw CLIError.invalidOption("Prompt encoder unavailable (pipeline already used).")
+          }
+          let upsampler = Flux2DevPromptUpsampler(
+            textEncoder: promptEncoder.textEncoder,
+            processor: upsampleProcessor
+          )
+
+          let upsampleStart = clock.now
+          let upsampled = try upsampler.upsample(
+            prompts: [prompt],
+            images: upsampleImages,
+            temperature: 0.15,
+            maxNewTokens: 512,
+            seed: options.seed.map(UInt64.init),
+            prefillChunkSize: 256,
+            evaluationPolicy: .deferred,
+            onError: { _, error in
+              print("[warn] prompt upsampling failed: \(error)")
+            }
+          )
+          localTimes["prompt_upsample_s"] = seconds(clock.now - upsampleStart)
+          resolvedPrompt = upsampled.first ?? prompt
+          if options.printUpsampledPrompt {
+            print("[upsample] \(resolvedPrompt)")
+          }
+        } else {
+          resolvedPrompt = prompt
+        }
+
+        let genStart = clock.now
+        let output = try pipeline.generate(
+          prompts: [resolvedPrompt],
+          height: resolvedHeight,
+          width: resolvedWidth,
+          numInferenceSteps: steps,
+          guidanceScale: guidanceScale,
+          images: conditioningImages,
+          imageIdScale: imageIdScale,
+          maxLength: maxLength,
+          progressHandler: { progress in
+            print("[step \(progress.step)/\(progress.totalSteps)]")
           }
         )
-        stageTimes["prompt_upsample_s"] = seconds(clock.now - upsampleStart)
-        resolvedPrompt = upsampled.first ?? prompt
-        if options.printUpsampledPrompt {
-          print("[upsample] \(resolvedPrompt)")
-        }
-      } else {
-        resolvedPrompt = prompt
+        localTimes["pipeline_generate_s"] = seconds(clock.now - genStart)
+
+        let writeStart = clock.now
+        let outputURL = resolveOutputURL(options.outputPath)
+        try writeImage(image: output.decoded, url: outputURL)
+        localTimes["write_image_s"] = seconds(clock.now - writeStart)
       }
 
-      let genStart = clock.now
-      let output = try pipeline.generate(
-        prompts: [resolvedPrompt],
-        height: resolvedHeight,
-        width: resolvedWidth,
-        numInferenceSteps: steps,
-        guidanceScale: guidanceScale,
-        images: conditioningImages,
-        imageIdScale: imageIdScale,
-        maxLength: maxLength,
-        progressHandler: { progress in
-          print("[step \(progress.step)/\(progress.totalSteps)]")
-        }
-      )
-      stageTimes["pipeline_generate_s"] = seconds(clock.now - genStart)
+      if let limit = options.wiredMemoryLimit {
+        try Memory.withWiredLimit(limit, body)
+      } else {
+        try body()
+      }
 
-      let writeStart = clock.now
-      let outputURL = resolveOutputURL(options.outputPath)
-      try writeImage(image: output.decoded, url: outputURL)
-      stageTimes["write_image_s"] = seconds(clock.now - writeStart)
+      for (key, value) in localTimes {
+        stageTimes[key] = value
+      }
     }
   }
 }

@@ -48,49 +48,58 @@ public final class Flux2Pipeline {
     guidance: MLXArray? = nil,
     modelTimestepScale: Float = 0.001,
     evalInterval: Int = 5,
-    progressHandler: DenoiseProgressHandler? = nil
+    progressHandler: DenoiseProgressHandler? = nil,
+    wiredMemoryLimit: Int? = nil
   ) throws -> MLXArray {
     let stepValues = timestepValues ?? scheduler.timestepsValues
     let batch = latents.dim(0)
 
-    var current = latents
-    let combinedIds: MLXArray
-    let conditioningImageLatents: MLXArray?
+    let loopBody = { () throws -> MLXArray in
+      var current = latents
+      let combinedIds: MLXArray
+      let conditioningImageLatents: MLXArray?
 
-    if let imageConditioning {
-      conditioningImageLatents = imageConditioning.latents
-      combinedIds = MLX.concatenated([latentIds, imageConditioning.ids], axis: 1)
-    } else {
-      conditioningImageLatents = nil
-      combinedIds = latentIds
-    }
-
-    let totalSteps = stepValues.count
-    for (stepIndex, step) in stepValues.enumerated() {
-      let timestep = MLX.full([batch], values: step).asType(current.dtype)
-      let output = try denoiser.step(
-        latents: current,
-        encoderHiddenStates: encoderHiddenStates,
-        timestep: timestep,
-        imgIds: combinedIds,
-        txtIds: txtIds,
-        imageLatents: conditioningImageLatents,
-        guidance: guidance,
-        modelTimestepScale: modelTimestepScale
-      )
-      current = output.prevLatents
-
-      if evalInterval > 0, (stepIndex + 1) % evalInterval == 0 {
-        MLX.eval(current)
+      if let imageConditioning {
+        conditioningImageLatents = imageConditioning.latents
+        combinedIds = MLX.concatenated([latentIds, imageConditioning.ids], axis: 1)
+      } else {
+        conditioningImageLatents = nil
+        combinedIds = latentIds
       }
 
-      progressHandler?(DenoiseProgress(
-        step: stepIndex + 1,
-        totalSteps: totalSteps,
-        currentLatents: current
-      ))
+      let totalSteps = stepValues.count
+      for (stepIndex, step) in stepValues.enumerated() {
+        let timestep = MLX.full([batch], values: step).asType(current.dtype)
+        let output = try self.denoiser.step(
+          latents: current,
+          encoderHiddenStates: encoderHiddenStates,
+          timestep: timestep,
+          imgIds: combinedIds,
+          txtIds: txtIds,
+          imageLatents: conditioningImageLatents,
+          guidance: guidance,
+          modelTimestepScale: modelTimestepScale
+        )
+        current = output.prevLatents
+
+        if evalInterval > 0, (stepIndex + 1) % evalInterval == 0 {
+          MLX.eval(current)
+        }
+
+        progressHandler?(DenoiseProgress(
+          step: stepIndex + 1,
+          totalSteps: totalSteps,
+          currentLatents: current
+        ))
+      }
+      return current
     }
-    return current
+
+    if let limit = wiredMemoryLimit {
+      return try Memory.withWiredLimit(limit, loopBody)
+    } else {
+      return try loopBody()
+    }
   }
 
   public func decodeLatents(
@@ -112,7 +121,8 @@ public final class Flux2Pipeline {
     guidance: MLXArray? = nil,
     modelTimestepScale: Float = 0.001,
     evalInterval: Int = 5,
-    progressHandler: DenoiseProgressHandler? = nil
+    progressHandler: DenoiseProgressHandler? = nil,
+    wiredMemoryLimit: Int? = nil
   ) throws -> Flux2PipelineOutput {
     let packed = try denoiseLoop(
       latents: latents,
@@ -124,7 +134,8 @@ public final class Flux2Pipeline {
       guidance: guidance,
       modelTimestepScale: modelTimestepScale,
       evalInterval: evalInterval,
-      progressHandler: progressHandler
+      progressHandler: progressHandler,
+      wiredMemoryLimit: wiredMemoryLimit
     )
     let decoded = try decodeLatents(packed, latentIds: latentIds)
     MLX.eval(packed, decoded)
