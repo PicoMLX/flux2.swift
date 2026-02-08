@@ -246,7 +246,10 @@ extension CLI {
         numInferenceSteps: steps,
         guidanceScale: guidanceScale,
         images: conditioningImages,
-        imageIdScale: imageIdScale
+        imageIdScale: imageIdScale,
+        progressHandler: { progress in
+          print("[step \(progress.step)/\(progress.totalSteps)]")
+        }
       )
       stageTimes["pipeline_generate_s"] = seconds(clock.now - genStart)
 
@@ -360,7 +363,10 @@ extension CLI {
         guidanceScale: guidanceScale,
         images: conditioningImages,
         imageIdScale: imageIdScale,
-        maxLength: maxLength
+        maxLength: maxLength,
+        progressHandler: { progress in
+          print("[step \(progress.step)/\(progress.totalSteps)]")
+        }
       )
       stageTimes["pipeline_generate_s"] = seconds(clock.now - genStart)
 

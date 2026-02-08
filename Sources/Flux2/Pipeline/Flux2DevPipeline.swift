@@ -88,7 +88,8 @@ public final class Flux2DevPipeline {
     modelTimestepScale: Float = 0.001,
     images: [MLXArray]? = nil,
     imageIdScale: Int = 10,
-    maxLength: Int? = nil
+    maxLength: Int? = nil,
+    progressHandler: DenoiseProgressHandler? = nil
   ) throws -> Flux2DevPipelineOutput {
     guard let promptEncoder = promptEncoder else {
       throw Flux2DevPipelineError.promptEncoderReleased
@@ -114,7 +115,8 @@ public final class Flux2DevPipeline {
       guidanceScale: guidanceScale,
       modelTimestepScale: modelTimestepScale,
       images: images,
-      imageIdScale: imageIdScale
+      imageIdScale: imageIdScale,
+      progressHandler: progressHandler
     )
   }
 
@@ -129,7 +131,8 @@ public final class Flux2DevPipeline {
     guidanceScale: Float = 4.0,
     modelTimestepScale: Float = 0.001,
     images: [MLXArray]? = nil,
-    imageIdScale: Int = 10
+    imageIdScale: Int = 10,
+    progressHandler: DenoiseProgressHandler? = nil
   ) throws -> Flux2DevPipelineOutput {
     guard let promptEncoder = promptEncoder else {
       throw Flux2DevPipelineError.promptEncoderReleased
@@ -152,7 +155,8 @@ public final class Flux2DevPipeline {
       guidanceScale: guidanceScale,
       modelTimestepScale: modelTimestepScale,
       images: images,
-      imageIdScale: imageIdScale
+      imageIdScale: imageIdScale,
+      progressHandler: progressHandler
     )
   }
 
@@ -172,7 +176,8 @@ public final class Flux2DevPipeline {
     guidanceScale: Float,
     modelTimestepScale: Float,
     images: [MLXArray]?,
-    imageIdScale: Int
+    imageIdScale: Int,
+    progressHandler: DenoiseProgressHandler? = nil
   ) throws -> Flux2DevPipelineOutput {
     guard numInferenceSteps > 0 else {
       throw Flux2DevPipelineError.invalidNumInferenceSteps(numInferenceSteps)
@@ -233,7 +238,8 @@ public final class Flux2DevPipeline {
       imageConditioning: preparedImages.map { (latents: $0.latents, ids: $0.ids) },
       guidance: guidance,
       modelTimestepScale: modelTimestepScale,
-      evalInterval: 5
+      evalInterval: 5,
+      progressHandler: progressHandler
     )
 
     let decoded = try pipeline.decodeLatents(denoised, latentIds: prepared.ids)

@@ -96,7 +96,8 @@ public final class Flux2KleinPipeline {
     guidanceScale: Float = 1.0,
     modelTimestepScale: Float = 0.001,
     images: [MLXArray]? = nil,
-    imageIdScale: Int = 10
+    imageIdScale: Int = 10,
+    progressHandler: DenoiseProgressHandler? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard let promptEncoder = promptEncoder else {
       throw Flux2KleinPipelineError.promptEncoderReleased
@@ -135,7 +136,8 @@ public final class Flux2KleinPipeline {
       guidanceScale: classifierFreeGuidanceEnabled ? guidanceScale : 1.0,
       modelTimestepScale: modelTimestepScale,
       images: images,
-      imageIdScale: imageIdScale
+      imageIdScale: imageIdScale,
+      progressHandler: progressHandler
     )
   }
 
@@ -152,7 +154,8 @@ public final class Flux2KleinPipeline {
     guidanceScale: Float = 1.0,
     modelTimestepScale: Float = 0.001,
     images: [MLXArray]? = nil,
-    imageIdScale: Int = 10
+    imageIdScale: Int = 10,
+    progressHandler: DenoiseProgressHandler? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard let promptEncoder = promptEncoder else {
       throw Flux2KleinPipelineError.promptEncoderReleased
@@ -224,7 +227,8 @@ public final class Flux2KleinPipeline {
       guidanceScale: classifierFreeGuidanceEnabled ? guidanceScale : 1.0,
       modelTimestepScale: modelTimestepScale,
       images: images,
-      imageIdScale: imageIdScale
+      imageIdScale: imageIdScale,
+      progressHandler: progressHandler
     )
   }
 
@@ -254,7 +258,8 @@ public final class Flux2KleinPipeline {
     guidanceScale: Float,
     modelTimestepScale: Float,
     images: [MLXArray]?,
-    imageIdScale: Int
+    imageIdScale: Int,
+    progressHandler: DenoiseProgressHandler? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard numInferenceSteps > 0 else {
       throw Flux2KleinPipelineError.invalidNumInferenceSteps(numInferenceSteps)
@@ -312,7 +317,8 @@ public final class Flux2KleinPipeline {
       negativeEncoding: negativeEncoding,
       guidanceScale: guidanceScale,
       modelTimestepScale: modelTimestepScale,
-      imageConditioning: preparedImages.map { (latents: $0.latents, ids: $0.ids) }
+      imageConditioning: preparedImages.map { (latents: $0.latents, ids: $0.ids) },
+      progressHandler: progressHandler
     )
 
     let decoded = try pipeline.decodeLatents(denoised, latentIds: prepared.ids)
@@ -349,7 +355,8 @@ public final class Flux2KleinPipeline {
     guidanceScale: Float,
     modelTimestepScale: Float,
     imageConditioning: (latents: MLXArray, ids: MLXArray)?,
-    evalInterval: Int = 5
+    evalInterval: Int = 5,
+    progressHandler: DenoiseProgressHandler? = nil
   ) throws -> MLXArray {
     let stepValues = scheduler.timestepsValues
     let batch = latents.dim(0)
@@ -365,6 +372,7 @@ public final class Flux2KleinPipeline {
       combinedIds = latentIds
     }
 
+    let totalSteps = stepValues.count
     for (stepIndex, step) in stepValues.enumerated() {
       let timestep = MLX.full([batch], values: step).asType(current.dtype)
       var noisePred = predictNoise(
@@ -400,6 +408,12 @@ public final class Flux2KleinPipeline {
       if evalInterval > 0, (stepIndex + 1) % evalInterval == 0 {
         MLX.eval(current)
       }
+
+      progressHandler?(DenoiseProgress(
+        step: stepIndex + 1,
+        totalSteps: totalSteps,
+        currentLatents: current
+      ))
     }
 
     return current

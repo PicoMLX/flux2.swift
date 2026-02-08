@@ -1,11 +1,19 @@
 import Foundation
-import MLX
+@preconcurrency import MLX
 import MLXNN
 
 public struct Flux2PipelineOutput {
   public let packedLatents: MLXArray
   public let decoded: MLXArray
 }
+
+public struct DenoiseProgress: Sendable {
+  public let step: Int
+  public let totalSteps: Int
+  public let currentLatents: MLXArray
+}
+
+public typealias DenoiseProgressHandler = @Sendable (DenoiseProgress) -> Void
 
 public final class Flux2Pipeline {
   public let transformer: Flux2Transformer2DModel
@@ -34,7 +42,8 @@ public final class Flux2Pipeline {
     imageConditioning: (latents: MLXArray, ids: MLXArray)? = nil,
     guidance: MLXArray? = nil,
     modelTimestepScale: Float = 0.001,
-    evalInterval: Int = 5
+    evalInterval: Int = 5,
+    progressHandler: DenoiseProgressHandler? = nil
   ) throws -> MLXArray {
     let stepValues = timestepValues ?? scheduler.timestepsValues
     let batch = latents.dim(0)
@@ -51,6 +60,7 @@ public final class Flux2Pipeline {
       combinedIds = latentIds
     }
 
+    let totalSteps = stepValues.count
     for (stepIndex, step) in stepValues.enumerated() {
       let timestep = MLX.full([batch], values: step).asType(current.dtype)
       let output = try denoiser.step(
@@ -68,6 +78,12 @@ public final class Flux2Pipeline {
       if evalInterval > 0, (stepIndex + 1) % evalInterval == 0 {
         MLX.eval(current)
       }
+
+      progressHandler?(DenoiseProgress(
+        step: stepIndex + 1,
+        totalSteps: totalSteps,
+        currentLatents: current
+      ))
     }
     return current
   }
@@ -90,7 +106,8 @@ public final class Flux2Pipeline {
     imageConditioning: (latents: MLXArray, ids: MLXArray)? = nil,
     guidance: MLXArray? = nil,
     modelTimestepScale: Float = 0.001,
-    evalInterval: Int = 5
+    evalInterval: Int = 5,
+    progressHandler: DenoiseProgressHandler? = nil
   ) throws -> Flux2PipelineOutput {
     let packed = try denoiseLoop(
       latents: latents,
@@ -101,7 +118,8 @@ public final class Flux2Pipeline {
       imageConditioning: imageConditioning,
       guidance: guidance,
       modelTimestepScale: modelTimestepScale,
-      evalInterval: evalInterval
+      evalInterval: evalInterval,
+      progressHandler: progressHandler
     )
     let decoded = try decodeLatents(packed, latentIds: latentIds)
     MLX.eval(packed, decoded)
