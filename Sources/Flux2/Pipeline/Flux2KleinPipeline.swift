@@ -316,6 +316,31 @@ public final class Flux2KleinPipeline {
       if images.isEmpty {
         throw Flux2KleinPipelineError.invalidImageCount(images.count)
       }
+
+      // Check attention memory budget before encoding reference images.
+      let refDims: [(height: Int, width: Int)] = images.map { img in
+        (height: img.dim(1), width: img.dim(2))
+      }
+      let numHeads = transformer.configuration.numAttentionHeads
+      let textSeqLen = promptEncoding.textIds.dim(1)
+      let estimatedBytes = Flux2AttentionBudget.attentionBytes(
+        numHeads: numHeads,
+        outputHeight: height,
+        outputWidth: width,
+        referenceImageDims: refDims,
+        textSeqLen: textSeqLen
+      )
+      let maxBytes = Flux2AttentionBudget.defaultMaxBytes
+      if estimatedBytes > maxBytes {
+        throw Flux2AttentionBudgetError.attentionExceedsBudget(
+          estimatedGB: Double(estimatedBytes) / (1024 * 1024 * 1024),
+          maxGB: Double(maxBytes) / (1024 * 1024 * 1024),
+          outputHeight: height,
+          outputWidth: width,
+          referenceCount: images.count
+        )
+      }
+
       preparedImages = try Flux2LatentPreparation.prepareImageLatents(
         images: images,
         batchSize: batchSize,
