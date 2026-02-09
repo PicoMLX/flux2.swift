@@ -13,7 +13,7 @@ public struct SafeTensorMetadata: Sendable {
   }
 }
 
-public enum SafeTensorsReaderError: Error {
+public enum SafeTensorsReaderError: Error, LocalizedError {
   case fileTooSmall(URL)
   case invalidHeaderLength(URL)
   case malformedHeader(URL)
@@ -24,6 +24,34 @@ public enum SafeTensorsReaderError: Error {
   case invalidShape(name: String)
   case tensorNotFound(String)
   case unmappedData(URL)
+
+  public var errorDescription: String? {
+    switch self {
+    case .fileTooSmall(let url):
+      return "SafeTensors file '\(url.lastPathComponent)' is too small to be valid. "
+        + "The file may be from an interrupted download — try re-downloading it."
+    case .invalidHeaderLength(let url):
+      return "SafeTensors file '\(url.lastPathComponent)' has an invalid header length. "
+        + "The file may be corrupted or from an interrupted download — try re-downloading it."
+    case .malformedHeader(let url):
+      return "SafeTensors file '\(url.lastPathComponent)' has a malformed header."
+    case .tensorMetadataMissing(let name):
+      return "Tensor '\(name)' has missing or incomplete metadata."
+    case .unsupportedDType(let dtype):
+      return "Unsupported tensor data type: '\(dtype)'."
+    case .unsupportedScalarDType(let name, let dtype):
+      return "Tensor '\(name)' has unsupported scalar data type '\(dtype)'."
+    case .invalidOffsets(let name):
+      return "Tensor '\(name)' data extends beyond the file boundary. "
+        + "The file may be from an interrupted download — try re-downloading it."
+    case .invalidShape(let name):
+      return "Tensor '\(name)' has an invalid shape or size mismatch."
+    case .tensorNotFound(let name):
+      return "Tensor '\(name)' was not found in the file."
+    case .unmappedData(let url):
+      return "Failed to access memory-mapped data for '\(url.lastPathComponent)'."
+    }
+  }
 }
 
 public final class SafeTensorsReader {
