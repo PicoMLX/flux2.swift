@@ -141,6 +141,51 @@ This reproduces the “prompt upsampling” workflow from the upstream FLUX.2 do
   --output temp/dev_i2i_upsample.png
 ```
 
+### Progress reporting
+
+The CLI automatically prints `[step N/total]` during image generation — no extra flags needed. This shows denoising progress in real time.
+
+### Library: progress callbacks
+
+The `progressHandler` parameter on `generate()` (and `generateTokens()`) lets you observe each denoising step:
+
+```swift
+let output = try pipeline.generate(
+  prompts: ["A cat"],
+  height: 512,
+  width: 512,
+  numInferenceSteps: 50,
+  progressHandler: { progress in
+    print("Step \(progress.step)/\(progress.totalSteps)")
+  }
+)
+```
+
+The callback receives a `DenoiseProgress` value with `step`, `totalSteps`, and `currentLatents` (the intermediate latent tensor, useful for live previews).
+
+### Library: AsyncStream API
+
+For SwiftUI and other async consumers, each pipeline provides a `generateStream()` method that wraps the callback API in an `AsyncStream<GenerationEvent>`:
+
+```swift
+let stream = pipeline.generateStream(
+  prompts: ["A cat"],
+  height: 512,
+  width: 512,
+  numInferenceSteps: 50
+)
+
+for await event in stream {
+  switch event {
+  case .progress(let progress):
+    print("Step \(progress.step)/\(progress.totalSteps)")
+  case .completed(let output):
+    // output.decoded contains the final image
+    break
+  }
+}
+```
+
 ### Wired GPU memory
 
 On Apple Silicon, the OS can page GPU memory to disk under memory pressure, causing latency spikes during inference. The `--wired-memory` flag uses Metal's `MTLResidencySet` to pin GPU allocations in physical RAM, preventing paging.
