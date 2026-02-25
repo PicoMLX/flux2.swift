@@ -4,6 +4,10 @@ import MLXNN
 
 /// Metadata-only progress report from the denoise loop.
 /// Does not contain any `MLXArray` values — safe to cross Sendable boundaries.
+///
+/// Progress events are UI metadata, not precise performance timing points.
+/// MLX executes lazily, so some GPU work may still be deferred until a later
+/// `MLX.eval(...)` or value materialization.
 public struct GenerationProgress: Sendable {
   /// Current step (1-based).
   public let step: Int
@@ -19,6 +23,10 @@ public struct GenerationProgress: Sendable {
   }
 }
 
+/// Receives metadata-only progress updates.
+///
+/// - Important: If you need per-step timing, force evaluation (`MLX.eval`) at the
+///   measurement boundary instead of timing this callback.
 public typealias GenerationProgressHandler = @Sendable (GenerationProgress) -> Void
 
 /// Callback invoked after each denoise step with access to intermediate latents.

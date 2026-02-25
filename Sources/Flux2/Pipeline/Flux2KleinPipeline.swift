@@ -89,6 +89,13 @@ public final class Flux2KleinPipeline {
 
   // MARK: - Synchronous API
 
+  /// Generate an image synchronously.
+  ///
+  /// - Important: `wiredMemoryLimit` is currently not applied in the synchronous
+  ///   API path because MLX's synchronous `Memory.withWiredLimit` wrapper is a
+  ///   deprecated no-op. Use `generateTask(..., wiredMemoryLimit:)` or
+  ///   `generateTask(..., wiredMemoryTicket:)` for effective wired-memory
+  ///   coordination.
   public func generate(
     prompts: [String],
     height: Int,
@@ -147,6 +154,13 @@ public final class Flux2KleinPipeline {
     )
   }
 
+  /// Generate an image synchronously from pre-tokenized inputs.
+  ///
+  /// - Important: `wiredMemoryLimit` is currently not applied in the synchronous
+  ///   API path because MLX's synchronous `Memory.withWiredLimit` wrapper is a
+  ///   deprecated no-op. Use `generateTask(..., wiredMemoryLimit:)` or
+  ///   `generateTask(..., wiredMemoryTicket:)` for effective wired-memory
+  ///   coordination.
   public func generateTokens(
     inputIds: MLXArray,
     attentionMask: MLXArray,
@@ -258,7 +272,40 @@ public final class Flux2KleinPipeline {
     guidanceScale: Float = 1.0,
     modelTimestepScale: Float = 0.001,
     images: [MLXArray]? = nil,
-    imageIdScale: Int = 10
+    imageIdScale: Int = 10,
+    wiredMemoryLimit: Int? = nil
+  ) throws -> GenerationHandle<CGImage> {
+    try generateTask(
+      prompts: prompts,
+      height: height,
+      width: width,
+      numInferenceSteps: numInferenceSteps,
+      numImagesPerPrompt: numImagesPerPrompt,
+      latents: latents,
+      guidanceScale: guidanceScale,
+      modelTimestepScale: modelTimestepScale,
+      images: images,
+      imageIdScale: imageIdScale,
+      wiredMemoryTicket: wiredMemoryLimit.map(Flux2WiredMemory.requestTicket(limit:))
+    )
+  }
+
+  /// Launch an asynchronous generation task using a pre-built wired-memory ticket.
+  ///
+  /// Progress events are metadata-only and may be emitted before all GPU work for
+  /// a step is materialized because MLX evaluation is lazy.
+  public func generateTask(
+    prompts: [String],
+    height: Int,
+    width: Int,
+    numInferenceSteps: Int,
+    numImagesPerPrompt: Int = 1,
+    latents: MLXArray? = nil,
+    guidanceScale: Float = 1.0,
+    modelTimestepScale: Float = 0.001,
+    images: [MLXArray]? = nil,
+    imageIdScale: Int = 10,
+    wiredMemoryTicket: WiredMemoryTicket?
   ) throws -> GenerationHandle<CGImage> {
     let (progressStream, progressContinuation) = AsyncThrowingStream.makeStream(
       of: GenerationProgress.self
@@ -274,21 +321,32 @@ public final class Flux2KleinPipeline {
       }
 
       do {
-        let output = try params.pipeline.generateTaskBody(
-          prompts: prompts,
-          height: height,
-          width: width,
-          numInferenceSteps: numInferenceSteps,
-          numImagesPerPrompt: numImagesPerPrompt,
-          latents: params.latents,
-          guidanceScale: guidanceScale,
-          modelTimestepScale: modelTimestepScale,
-          images: params.images,
-          imageIdScale: imageIdScale,
-          progressContinuation: progressContinuation
-        )
+        let body = { () throws -> CGImage in
+          let output = try params.pipeline.generateTaskBody(
+            prompts: prompts,
+            height: height,
+            width: width,
+            numInferenceSteps: numInferenceSteps,
+            numImagesPerPrompt: numImagesPerPrompt,
+            latents: params.latents,
+            guidanceScale: guidanceScale,
+            modelTimestepScale: modelTimestepScale,
+            images: params.images,
+            imageIdScale: imageIdScale,
+            progressContinuation: progressContinuation
+          )
 
-        let cgImage = try ImageConversion.cgImage(from: output.decoded)
+          return try ImageConversion.cgImage(from: output.decoded)
+        }
+
+        let cgImage: CGImage
+        if let wiredMemoryTicket {
+          cgImage = try await wiredMemoryTicket.withWiredLimit {
+            try body()
+          }
+        } else {
+          cgImage = try body()
+        }
         progressContinuation.finish()
         return cgImage
       } catch {

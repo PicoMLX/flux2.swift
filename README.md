@@ -296,7 +296,9 @@ class GenerationViewModel {
 ### Key design points
 
 - **Metadata-only progress**: `GenerationProgress` contains `step`, `totalSteps`, and `fractionCompleted` -- no `MLXArray`. Safe to cross `Sendable` boundaries and use from any actor.
+- **Progress timing caveat**: Progress events are emitted from a lazily-evaluated MLX pipeline. Treat them as UI metadata, not exact GPU step completion timestamps. For timing, measure around explicit `MLX.eval(...)` boundaries.
 - **Cancellation**: `handle.cancel()` propagates cooperative cancellation into the denoise loop via `Task.checkCancellation()`. Dropping the progress stream also cancels the task.
+- **Log ordering caveat**: If your app consumes `handle.progress` and awaits `handle.value()` in separate tasks, you can log "success" before the final progress events are drained. Prefer a single parent task that waits for both before final completion/eviction logs.
 - **`ImageConversion`**: `ImageConversion.cgImage(from:)` converts a decoded NCHW `MLXArray` (values in [-1, 1]) to a `CGImage`. Used internally by `generateTask()` and available for manual use with the synchronous API.
 - **Concurrency policy**: The library does not serialize concurrent requests on a shared pipeline instance. If an app shares one instance across requests, enforce serialization in the app layer (e.g., actor or queue), or use one pipeline instance per request.
 
@@ -316,21 +318,24 @@ let output = try pipeline.generate(
 
 > **CAUTION:** Large reference images combined with large output dimensions can exceed the 4 GB attention memory budget. The pipeline throws `Flux2AttentionBudgetError.attentionExceedsBudget` before allocating if this limit would be exceeded. The error message includes the estimated size and suggests reducing dimensions.
 
-### Pin GPU memory (wired memory)
+### Pin GPU memory (wired memory, async generation)
 
 On Apple Silicon, the OS can page GPU memory to disk under pressure, causing latency spikes. Use `wiredMemoryLimit` to pin allocations in physical RAM via Metal's `MTLResidencySet`.
 
 ```swift
-let output = try pipeline.generate(
+let handle = try pipeline.generateTask(
   prompts: ["A cat"],
   height: 512,
   width: 512,
   numInferenceSteps: 4,
   wiredMemoryLimit: 8_589_934_592  // 8 GB, or nil to disable (default)
 )
+let image = try await handle.value()
 ```
 
-The wired limit is applied *after* the model loads into GPU memory. MLX wiring is retroactive — it immediately pins existing allocations, not only future ones.
+The wired limit is applied on the async `generateTask` path and is coordinated with MLX wired-memory tickets.
+
+> **Important:** The synchronous `generate(..., wiredMemoryLimit:)` / `generateTokens(..., wiredMemoryLimit:)` parameters are currently not applied. In current MLX versions, the synchronous `Memory.withWiredLimit` API is deprecated and a no-op.
 
 **How much to wire:** The main cost is model weights.
 

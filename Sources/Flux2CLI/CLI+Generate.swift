@@ -48,6 +48,26 @@ extension CLI {
     return Double(components.seconds) + (Double(components.attoseconds) / 1e18)
   }
 
+  private static let wiredMemoryPolicy = WiredSumPolicy(
+    id: UUID(uuidString: "7A7F3E2D-26F6-41D8-82A8-17B0E8D1A851")!
+  )
+
+  private static func withOptionalWiredMemoryLimit<R>(
+    _ limit: Int?,
+    _ body: () async throws -> R
+  ) async rethrows -> R {
+    guard let limit else {
+      return try await body()
+    }
+    let ticket = WiredMemoryTicket(
+      size: max(0, limit),
+      policy: wiredMemoryPolicy,
+      manager: .shared,
+      kind: .active
+    )
+    return try await ticket.withWiredLimit(body)
+  }
+
   private static func writeMetrics(_ metrics: GenerateRunMetrics, to path: String) {
     let url = URL(fileURLWithPath: path).standardizedFileURL
     do {
@@ -198,7 +218,7 @@ extension CLI {
 
     let dtype = resolvedDType
 
-    try Device.withDefaultDevice(.gpu) {
+    let localTimes = try await Device.withDefaultDevice(.gpu) { () async throws -> [String: Double] in
       var localTimes: [String: Double] = [:]
 
       let body = { () throws -> Void in
@@ -263,15 +283,15 @@ extension CLI {
         localTimes["write_image_s"] = seconds(clock.now - writeStart)
       }
 
-      if let limit = options.wiredMemoryLimit {
-        try Memory.withWiredLimit(limit, body)
-      } else {
+      try await withOptionalWiredMemoryLimit(options.wiredMemoryLimit) {
         try body()
       }
 
-      for (key, value) in localTimes {
-        stageTimes[key] = value
-      }
+      return localTimes
+    }
+
+    for (key, value) in localTimes {
+      stageTimes[key] = value
     }
   }
 
@@ -290,7 +310,7 @@ extension CLI {
 
     let dtype = resolvedDType
 
-    try Device.withDefaultDevice(.gpu) {
+    let localTimes = try await Device.withDefaultDevice(.gpu) { () async throws -> [String: Double] in
       var localTimes: [String: Double] = [:]
 
       let body = { () throws -> Void in
@@ -394,15 +414,15 @@ extension CLI {
         localTimes["write_image_s"] = seconds(clock.now - writeStart)
       }
 
-      if let limit = options.wiredMemoryLimit {
-        try Memory.withWiredLimit(limit, body)
-      } else {
+      try await withOptionalWiredMemoryLimit(options.wiredMemoryLimit) {
         try body()
       }
 
-      for (key, value) in localTimes {
-        stageTimes[key] = value
-      }
+      return localTimes
+    }
+
+    for (key, value) in localTimes {
+      stageTimes[key] = value
     }
   }
 }

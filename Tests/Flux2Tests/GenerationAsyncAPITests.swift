@@ -1,4 +1,6 @@
+import CoreGraphics
 import Foundation
+import MLX
 import XCTest
 @testable import Flux2
 
@@ -55,6 +57,111 @@ final class GenerationProgressTests: XCTestCase {
   }
 }
 
+// MARK: - GenerationHandle tests
+
+final class GenerationHandleTests: XCTestCase {
+
+  func testCancelCancelsUnderlyingTask() async {
+    let (stream, continuation) = AsyncThrowingStream<GenerationProgress, Error>.makeStream(
+      of: GenerationProgress.self
+    )
+    let task = Task<Int, Error> {
+      while !Task.isCancelled {
+        try await Task.sleep(nanoseconds: 5_000_000)
+      }
+      throw CancellationError()
+    }
+    let handle = GenerationHandle(progress: stream, task: task)
+
+    handle.cancel()
+    continuation.finish(throwing: CancellationError())
+
+    do {
+      _ = try await handle.value()
+      XCTFail("Expected CancellationError")
+    } catch is CancellationError {
+      // Expected
+    } catch {
+      XCTFail("Unexpected error: \(error)")
+    }
+  }
+
+  func testProgressCanDrainBeforeAwaitingValue() async throws {
+    let (stream, continuation) = AsyncThrowingStream<GenerationProgress, Error>.makeStream(
+      of: GenerationProgress.self
+    )
+    let task = Task<Int, Error> {
+      continuation.yield(GenerationProgress(step: 1, totalSteps: 2))
+      continuation.yield(GenerationProgress(step: 2, totalSteps: 2))
+      continuation.finish()
+      return 42
+    }
+
+    let handle = GenerationHandle(progress: stream, task: task)
+    var steps: [Int] = []
+    for try await progress in handle.progress {
+      steps.append(progress.step)
+    }
+
+    XCTAssertEqual(steps, [1, 2])
+    let value = try await handle.value()
+    XCTAssertEqual(value, 42)
+  }
+}
+
+// MARK: - API surface tests
+
+final class GenerationAsyncAPISurfaceTests: XCTestCase {
+
+  func testKleinGenerateTaskWiredMemoryOverloadsCompile() {
+    let limitOverload = { (pipeline: Flux2KleinPipeline) throws in
+      try pipeline.generateTask(
+        prompts: ["cat"],
+        height: 64,
+        width: 64,
+        numInferenceSteps: 1,
+        wiredMemoryLimit: nil
+      )
+    }
+    let ticketOverload = { (pipeline: Flux2KleinPipeline, ticket: WiredMemoryTicket?) throws in
+      try pipeline.generateTask(
+        prompts: ["cat"],
+        height: 64,
+        width: 64,
+        numInferenceSteps: 1,
+        wiredMemoryTicket: ticket
+      )
+    }
+
+    XCTAssertNotNil(limitOverload as Any)
+    XCTAssertNotNil(ticketOverload as Any)
+  }
+
+  func testDevGenerateTaskWiredMemoryOverloadsCompile() {
+    let limitOverload = { (pipeline: Flux2DevPipeline) throws in
+      try pipeline.generateTask(
+        prompts: ["cat"],
+        height: 64,
+        width: 64,
+        numInferenceSteps: 1,
+        wiredMemoryLimit: nil
+      )
+    }
+    let ticketOverload = { (pipeline: Flux2DevPipeline, ticket: WiredMemoryTicket?) throws in
+      try pipeline.generateTask(
+        prompts: ["cat"],
+        height: 64,
+        width: 64,
+        numInferenceSteps: 1,
+        wiredMemoryTicket: ticket
+      )
+    }
+
+    XCTAssertNotNil(limitOverload as Any)
+    XCTAssertNotNil(ticketOverload as Any)
+  }
+}
+
 // MARK: - ImageConversion tests
 
 final class ImageConversionTests: XCTestCase {
@@ -81,6 +188,3 @@ final class ImageConversionTests: XCTestCase {
     }
   }
 }
-
-// Need to import MLX for ImageConversion tests
-import MLX
