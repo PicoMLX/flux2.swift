@@ -93,7 +93,8 @@ public final class Flux2DevPipeline {
     imageIdScale: Int = 10,
     maxLength: Int? = nil,
     progressHandler: GenerationProgressHandler? = nil,
-    wiredMemoryLimit: Int? = nil
+    wiredMemoryLimit: Int? = nil,
+    denoiseStepCallback: DenoiseStepCallback? = nil
   ) throws -> Flux2DevPipelineOutput {
     guard let promptEncoder = promptEncoder else {
       throw Flux2DevPipelineError.promptEncoderReleased
@@ -121,7 +122,7 @@ public final class Flux2DevPipeline {
       images: images,
       imageIdScale: imageIdScale,
       progressHandler: progressHandler,
-      wiredMemoryLimit: wiredMemoryLimit
+      denoiseStepCallback: denoiseStepCallback
     )
   }
 
@@ -138,7 +139,8 @@ public final class Flux2DevPipeline {
     images: [MLXArray]? = nil,
     imageIdScale: Int = 10,
     progressHandler: GenerationProgressHandler? = nil,
-    wiredMemoryLimit: Int? = nil
+    wiredMemoryLimit: Int? = nil,
+    denoiseStepCallback: DenoiseStepCallback? = nil
   ) throws -> Flux2DevPipelineOutput {
     guard let promptEncoder = promptEncoder else {
       throw Flux2DevPipelineError.promptEncoderReleased
@@ -163,7 +165,7 @@ public final class Flux2DevPipeline {
       images: images,
       imageIdScale: imageIdScale,
       progressHandler: progressHandler,
-      wiredMemoryLimit: wiredMemoryLimit
+      denoiseStepCallback: denoiseStepCallback
     )
   }
 
@@ -301,7 +303,8 @@ public final class Flux2DevPipeline {
     images: [MLXArray]?,
     imageIdScale: Int,
     progressHandler: GenerationProgressHandler? = nil,
-    wiredMemoryLimit: Int? = nil
+    wiredMemoryLimit: Int? = nil,
+    denoiseStepCallback: DenoiseStepCallback? = nil
   ) throws -> Flux2DevPipelineOutput {
     guard numInferenceSteps > 0 else {
       throw Flux2DevPipelineError.invalidNumInferenceSteps(numInferenceSteps)
@@ -389,7 +392,8 @@ public final class Flux2DevPipeline {
         guidance: guidance,
         modelTimestepScale: modelTimestepScale,
         evalInterval: 5,
-        progressHandler: progressHandler
+        progressHandler: progressHandler,
+        denoiseStepCallback: denoiseStepCallback
       )
 
       let decoded = try self.pipeline.decodeLatents(denoised, latentIds: prepared.ids)
@@ -418,10 +422,15 @@ public final class Flux2DevPipeline {
       )
     }
 
-    if let limit = wiredMemoryLimit {
-      return try Memory.withWiredLimit(limit, body)
-    } else {
-      return try body()
-    }
+    return try body()
+  }
+
+  // MARK: - Public Convenience
+
+  public func decodeLatents(
+    _ packedLatents: MLXArray,
+    latentIds: MLXArray
+  ) throws -> MLXArray {
+    try pipeline.decodeLatents(packedLatents, latentIds: latentIds)
   }
 }

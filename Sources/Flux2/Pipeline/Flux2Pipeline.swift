@@ -21,6 +21,20 @@ public struct GenerationProgress: Sendable {
 
 public typealias GenerationProgressHandler = @Sendable (GenerationProgress) -> Void
 
+/// Callback invoked after each denoise step with access to intermediate latents.
+///
+/// Not `@Sendable` because `MLXArray` is not `Sendable`. Runs synchronously
+/// inline within the denoise loop.
+///
+/// - Parameters:
+///   - step: Current step (1-based).
+///   - totalSteps: Total number of denoise steps.
+///   - currentLatents: Packed latents after this step's scheduler update.
+///   - latentIds: Image-only latent position IDs (suitable for `decodeLatents`).
+public typealias DenoiseStepCallback = (
+  _ step: Int, _ totalSteps: Int, _ currentLatents: MLXArray, _ latentIds: MLXArray
+) throws -> Void
+
 public struct Flux2PipelineOutput {
   public let packedLatents: MLXArray
   public let decoded: MLXArray
@@ -54,7 +68,8 @@ public final class Flux2Pipeline {
     guidance: MLXArray? = nil,
     modelTimestepScale: Float = 0.001,
     evalInterval: Int = 5,
-    progressHandler: GenerationProgressHandler? = nil
+    progressHandler: GenerationProgressHandler? = nil,
+    denoiseStepCallback: DenoiseStepCallback? = nil
   ) throws -> MLXArray {
     let stepValues = timestepValues ?? scheduler.timestepsValues
     let batch = latents.dim(0)
@@ -94,6 +109,7 @@ public final class Flux2Pipeline {
       }
 
       progressHandler?(GenerationProgress(step: stepIndex + 1, totalSteps: totalSteps))
+      try denoiseStepCallback?(stepIndex + 1, totalSteps, current, latentIds)
     }
 
     return current
@@ -118,7 +134,8 @@ public final class Flux2Pipeline {
     guidance: MLXArray? = nil,
     modelTimestepScale: Float = 0.001,
     evalInterval: Int = 5,
-    progressHandler: GenerationProgressHandler? = nil
+    progressHandler: GenerationProgressHandler? = nil,
+    denoiseStepCallback: DenoiseStepCallback? = nil
   ) throws -> Flux2PipelineOutput {
     let packed = try denoiseLoop(
       latents: latents,
@@ -130,7 +147,8 @@ public final class Flux2Pipeline {
       guidance: guidance,
       modelTimestepScale: modelTimestepScale,
       evalInterval: evalInterval,
-      progressHandler: progressHandler
+      progressHandler: progressHandler,
+      denoiseStepCallback: denoiseStepCallback
     )
     let decoded = try decodeLatents(packed, latentIds: latentIds)
     MLX.eval(packed, decoded)

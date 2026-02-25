@@ -101,7 +101,8 @@ public final class Flux2KleinPipeline {
     images: [MLXArray]? = nil,
     imageIdScale: Int = 10,
     progressHandler: GenerationProgressHandler? = nil,
-    wiredMemoryLimit: Int? = nil
+    wiredMemoryLimit: Int? = nil,
+    denoiseStepCallback: DenoiseStepCallback? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard let promptEncoder = promptEncoder else {
       throw Flux2KleinPipelineError.promptEncoderReleased
@@ -142,7 +143,7 @@ public final class Flux2KleinPipeline {
       images: images,
       imageIdScale: imageIdScale,
       progressHandler: progressHandler,
-      wiredMemoryLimit: wiredMemoryLimit
+      denoiseStepCallback: denoiseStepCallback
     )
   }
 
@@ -161,7 +162,8 @@ public final class Flux2KleinPipeline {
     images: [MLXArray]? = nil,
     imageIdScale: Int = 10,
     progressHandler: GenerationProgressHandler? = nil,
-    wiredMemoryLimit: Int? = nil
+    wiredMemoryLimit: Int? = nil,
+    denoiseStepCallback: DenoiseStepCallback? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard let promptEncoder = promptEncoder else {
       throw Flux2KleinPipelineError.promptEncoderReleased
@@ -235,7 +237,7 @@ public final class Flux2KleinPipeline {
       images: images,
       imageIdScale: imageIdScale,
       progressHandler: progressHandler,
-      wiredMemoryLimit: wiredMemoryLimit
+      denoiseStepCallback: denoiseStepCallback
     )
   }
 
@@ -392,7 +394,7 @@ public final class Flux2KleinPipeline {
     images: [MLXArray]?,
     imageIdScale: Int,
     progressHandler: GenerationProgressHandler? = nil,
-    wiredMemoryLimit: Int? = nil
+    denoiseStepCallback: DenoiseStepCallback? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard numInferenceSteps > 0 else {
       throw Flux2KleinPipelineError.invalidNumInferenceSteps(numInferenceSteps)
@@ -468,49 +470,42 @@ public final class Flux2KleinPipeline {
     try scheduler.setTimesteps(numInferenceSteps: numInferenceSteps, sigmas: sigmas, mu: mu)
     scheduler.setBeginIndex(0)
 
-    let body = { () throws -> Flux2KleinPipelineOutput in
-      let denoised = try self.denoise(
-        latents: prepared.latents,
-        latentIds: prepared.ids,
-        promptEncoding: promptEncoding,
-        negativeEncoding: negativeEncoding,
-        guidanceScale: guidanceScale,
-        modelTimestepScale: modelTimestepScale,
-        imageConditioning: preparedImages.map { (latents: $0.latents, ids: $0.ids) },
-        progressHandler: progressHandler
-      )
+    let denoised = try self.denoise(
+      latents: prepared.latents,
+      latentIds: prepared.ids,
+      promptEncoding: promptEncoding,
+      negativeEncoding: negativeEncoding,
+      guidanceScale: guidanceScale,
+      modelTimestepScale: modelTimestepScale,
+      imageConditioning: preparedImages.map { (latents: $0.latents, ids: $0.ids) },
+      progressHandler: progressHandler,
+      denoiseStepCallback: denoiseStepCallback
+    )
 
-      let decoded = try self.pipeline.decodeLatents(denoised, latentIds: prepared.ids)
+    let decoded = try self.pipeline.decodeLatents(denoised, latentIds: prepared.ids)
 
-      var toEval: [MLXArray] = [
-        denoised,
-        decoded,
-        promptEncoding.promptEmbeds,
-        promptEncoding.textIds,
-        prepared.ids,
-      ]
-      if let preparedImages {
-        toEval.append(preparedImages.latents)
-        toEval.append(preparedImages.ids)
-      }
-      MLX.eval(toEval)
-
-      return Flux2KleinPipelineOutput(
-        packedLatents: denoised,
-        decoded: decoded,
-        promptEmbeds: promptEncoding.promptEmbeds,
-        textIds: promptEncoding.textIds,
-        latentIds: prepared.ids,
-        imageLatents: preparedImages?.latents,
-        imageLatentIds: preparedImages?.ids
-      )
+    var toEval: [MLXArray] = [
+      denoised,
+      decoded,
+      promptEncoding.promptEmbeds,
+      promptEncoding.textIds,
+      prepared.ids,
+    ]
+    if let preparedImages {
+      toEval.append(preparedImages.latents)
+      toEval.append(preparedImages.ids)
     }
+    MLX.eval(toEval)
 
-    if let limit = wiredMemoryLimit {
-      return try Memory.withWiredLimit(limit, body)
-    } else {
-      return try body()
-    }
+    return Flux2KleinPipelineOutput(
+      packedLatents: denoised,
+      decoded: decoded,
+      promptEmbeds: promptEncoding.promptEmbeds,
+      textIds: promptEncoding.textIds,
+      latentIds: prepared.ids,
+      imageLatents: preparedImages?.latents,
+      imageLatentIds: preparedImages?.ids
+    )
   }
 
   private func denoise(
@@ -522,7 +517,8 @@ public final class Flux2KleinPipeline {
     modelTimestepScale: Float,
     imageConditioning: (latents: MLXArray, ids: MLXArray)?,
     evalInterval: Int = 5,
-    progressHandler: GenerationProgressHandler? = nil
+    progressHandler: GenerationProgressHandler? = nil,
+    denoiseStepCallback: DenoiseStepCallback? = nil
   ) throws -> MLXArray {
     let stepValues = scheduler.timestepsValues
     let batch = latents.dim(0)
@@ -579,9 +575,21 @@ public final class Flux2KleinPipeline {
       }
 
       progressHandler?(GenerationProgress(step: stepIndex + 1, totalSteps: totalSteps))
+      try denoiseStepCallback?(stepIndex + 1, totalSteps, current, latentIds)
     }
 
     return current
+  }
+
+  /// Decode packed latents to pixel data via the VAE.
+  ///
+  /// This is a convenience that delegates to the internal `Flux2Pipeline.decodeLatents`.
+  /// Use it from a ``DenoiseStepCallback`` to generate intermediate preview images.
+  public func decodeLatents(
+    _ packedLatents: MLXArray,
+    latentIds: MLXArray
+  ) throws -> MLXArray {
+    try pipeline.decodeLatents(packedLatents, latentIds: latentIds)
   }
 
   private func predictNoise(
