@@ -2,22 +2,28 @@ import Foundation
 @preconcurrency import MLX
 import MLXNN
 
-public struct Flux2PipelineOutput: Sendable {
+/// Metadata-only progress report from the denoise loop.
+/// Does not contain any `MLXArray` values — safe to cross Sendable boundaries.
+public struct GenerationProgress: Sendable {
+  /// Current step (1-based).
+  public let step: Int
+  /// Total number of denoise steps.
+  public let totalSteps: Int
+  /// Fraction completed in [0, 1].
+  public let fractionCompleted: Double
+
+  public init(step: Int, totalSteps: Int) {
+    self.step = step
+    self.totalSteps = totalSteps
+    self.fractionCompleted = totalSteps > 0 ? Double(step) / Double(totalSteps) : 0
+  }
+}
+
+public typealias GenerationProgressHandler = @Sendable (GenerationProgress) -> Void
+
+public struct Flux2PipelineOutput {
   public let packedLatents: MLXArray
   public let decoded: MLXArray
-}
-
-public struct DenoiseProgress: Sendable {
-  public let step: Int
-  public let totalSteps: Int
-  public let currentLatents: MLXArray
-}
-
-public typealias DenoiseProgressHandler = @Sendable (DenoiseProgress) -> Void
-
-public enum GenerationEvent: Sendable {
-  case progress(DenoiseProgress)
-  case completed(Flux2PipelineOutput)
 }
 
 public final class Flux2Pipeline {
@@ -48,58 +54,49 @@ public final class Flux2Pipeline {
     guidance: MLXArray? = nil,
     modelTimestepScale: Float = 0.001,
     evalInterval: Int = 5,
-    progressHandler: DenoiseProgressHandler? = nil,
-    wiredMemoryLimit: Int? = nil
+    progressHandler: GenerationProgressHandler? = nil
   ) throws -> MLXArray {
     let stepValues = timestepValues ?? scheduler.timestepsValues
     let batch = latents.dim(0)
 
-    let loopBody = { () throws -> MLXArray in
-      var current = latents
-      let combinedIds: MLXArray
-      let conditioningImageLatents: MLXArray?
+    var current = latents
+    let combinedIds: MLXArray
+    let conditioningImageLatents: MLXArray?
 
-      if let imageConditioning {
-        conditioningImageLatents = imageConditioning.latents
-        combinedIds = MLX.concatenated([latentIds, imageConditioning.ids], axis: 1)
-      } else {
-        conditioningImageLatents = nil
-        combinedIds = latentIds
-      }
-
-      let totalSteps = stepValues.count
-      for (stepIndex, step) in stepValues.enumerated() {
-        let timestep = MLX.full([batch], values: step).asType(current.dtype)
-        let output = try self.denoiser.step(
-          latents: current,
-          encoderHiddenStates: encoderHiddenStates,
-          timestep: timestep,
-          imgIds: combinedIds,
-          txtIds: txtIds,
-          imageLatents: conditioningImageLatents,
-          guidance: guidance,
-          modelTimestepScale: modelTimestepScale
-        )
-        current = output.prevLatents
-
-        if evalInterval > 0, (stepIndex + 1) % evalInterval == 0 {
-          MLX.eval(current)
-        }
-
-        progressHandler?(DenoiseProgress(
-          step: stepIndex + 1,
-          totalSteps: totalSteps,
-          currentLatents: current
-        ))
-      }
-      return current
-    }
-
-    if let limit = wiredMemoryLimit {
-      return try Memory.withWiredLimit(limit, loopBody)
+    if let imageConditioning {
+      conditioningImageLatents = imageConditioning.latents
+      combinedIds = MLX.concatenated([latentIds, imageConditioning.ids], axis: 1)
     } else {
-      return try loopBody()
+      conditioningImageLatents = nil
+      combinedIds = latentIds
     }
+
+    let totalSteps = stepValues.count
+    for (stepIndex, step) in stepValues.enumerated() {
+      // Check for cooperative cancellation
+      try Task.checkCancellation()
+
+      let timestep = MLX.full([batch], values: step).asType(current.dtype)
+      let output = try denoiser.step(
+        latents: current,
+        encoderHiddenStates: encoderHiddenStates,
+        timestep: timestep,
+        imgIds: combinedIds,
+        txtIds: txtIds,
+        imageLatents: conditioningImageLatents,
+        guidance: guidance,
+        modelTimestepScale: modelTimestepScale
+      )
+      current = output.prevLatents
+
+      if evalInterval > 0, (stepIndex + 1) % evalInterval == 0 {
+        MLX.eval(current)
+      }
+
+      progressHandler?(GenerationProgress(step: stepIndex + 1, totalSteps: totalSteps))
+    }
+
+    return current
   }
 
   public func decodeLatents(
@@ -121,8 +118,7 @@ public final class Flux2Pipeline {
     guidance: MLXArray? = nil,
     modelTimestepScale: Float = 0.001,
     evalInterval: Int = 5,
-    progressHandler: DenoiseProgressHandler? = nil,
-    wiredMemoryLimit: Int? = nil
+    progressHandler: GenerationProgressHandler? = nil
   ) throws -> Flux2PipelineOutput {
     let packed = try denoiseLoop(
       latents: latents,
@@ -134,8 +130,7 @@ public final class Flux2Pipeline {
       guidance: guidance,
       modelTimestepScale: modelTimestepScale,
       evalInterval: evalInterval,
-      progressHandler: progressHandler,
-      wiredMemoryLimit: wiredMemoryLimit
+      progressHandler: progressHandler
     )
     let decoded = try decodeLatents(packed, latentIds: latentIds)
     MLX.eval(packed, decoded)

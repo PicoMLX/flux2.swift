@@ -194,55 +194,111 @@ Download a Hugging Face model snapshot into the local cache.
 
 ---
 
-## Library API
+## Using the Swift Library
 
-Add the `Flux2` package to your `Package.swift`:
+Add `Flux2` as a dependency in your `Package.swift`:
 
 ```swift
-dependencies: [
-  .package(url: "https://github.com/mzbac/flux2.swift.git", branch: "main"),
-],
-targets: [
-  .target(name: "YourTarget", dependencies: [
-    .product(name: "Flux2", package: "flux2.swift"),
-  ]),
-]
+.package(url: "https://github.com/mzbac/flux2.swift", branch: "main")
 ```
 
-### Load a pipeline and generate an image
+### Synchronous generation
 
-The library provides two pipeline types, one per model family.
-
-**Klein (4B / 9B):**
+The simplest way to generate an image. Runs the full pipeline on the current thread and returns raw `MLXArray` output:
 
 ```swift
 import Flux2
+import MLX
 
-let snapshotURL = URL(fileURLWithPath: "/path/to/FLUX.2-klein-4B")
-let pipeline = try Flux2KleinPipeline(snapshot: snapshotURL)
+let pipeline = try Flux2KleinPipeline(
+  snapshot: snapshotURL,
+  dtype: .bfloat16
+)
 
 let output = try pipeline.generate(
-  prompts: ["A studio photo of a tabby cat"],
+  prompts: ["A tabby cat with green eyes"],
   height: 512,
   width: 512,
-  numInferenceSteps: 4
+  numInferenceSteps: 4,
+  guidanceScale: 1.0,
+  progressHandler: { progress in
+    print("Step \(progress.step)/\(progress.totalSteps) (\(Int(progress.fractionCompleted * 100))%)")
+  }
 )
-// output.decoded is an MLXArray with shape [batch, H, W, C]
+
+// output.decoded is an MLXArray in NCHW format with values in [-1, 1]
+let cgImage = try ImageConversion.cgImage(from: output.decoded)
 ```
 
-**Dev:**
+`Flux2DevPipeline` works the same way, but uses a guidance scale (default 4.0) and supports prompt upsampling.
+
+### Async generation with progress streaming (SwiftUI)
+
+For UI apps, `generateTask()` returns a `GenerationHandle<CGImage>` that streams metadata-only progress events and produces a `CGImage` on completion. The stream is non-blocking to create from `@MainActor`:
 
 ```swift
-let pipeline = try Flux2DevPipeline(snapshot: snapshotURL)
+import Flux2
+import SwiftUI
 
-let output = try pipeline.generate(
-  prompts: ["A hermit crab using a soda can as its shell"],
-  height: 1024,
-  width: 1024,
-  numInferenceSteps: 50,
-  guidanceScale: 4.0
-)
+@Observable
+class GenerationViewModel {
+  var progress: Double = 0
+  var image: CGImage?
+  var isGenerating = false
+
+  private var handle: GenerationHandle<CGImage>?
+
+  func generate(pipeline: Flux2KleinPipeline) {
+    do {
+      handle = try pipeline.generateTask(
+        prompts: ["A tabby cat with green eyes"],
+        height: 512,
+        width: 512,
+        numInferenceSteps: 4,
+        guidanceScale: 1.0
+      )
+      isGenerating = true
+
+      Task {
+        // Stream progress updates
+        do {
+          for try await step in handle!.progress {
+            await MainActor.run {
+              self.progress = step.fractionCompleted
+            }
+          }
+        } catch {}
+
+        // Await the final image
+        do {
+          let result = try await handle!.value()
+          await MainActor.run {
+            self.image = result
+            self.isGenerating = false
+          }
+        } catch {
+          await MainActor.run {
+            self.isGenerating = false
+          }
+        }
+      }
+    } catch {
+      print("Failed to start: \(error)")
+    }
+  }
+
+  func cancel() {
+    handle?.cancel()
+  }
+}
 ```
+
+### Key design points
+
+- **Metadata-only progress**: `GenerationProgress` contains `step`, `totalSteps`, and `fractionCompleted` -- no `MLXArray`. Safe to cross `Sendable` boundaries and use from any actor.
+- **Cancellation**: `handle.cancel()` propagates cooperative cancellation into the denoise loop via `Task.checkCancellation()`. Dropping the progress stream also cancels the task.
+- **`ImageConversion`**: `ImageConversion.cgImage(from:)` converts a decoded NCHW `MLXArray` (values in [-1, 1]) to a `CGImage`. Used internally by `generateTask()` and available for manual use with the synchronous API.
+- **Concurrency policy**: The library does not serialize concurrent requests on a shared pipeline instance. If an app shares one instance across requests, enforce serialization in the app layer (e.g., actor or queue), or use one pipeline instance per request.
 
 ### Image-to-image editing
 
@@ -259,53 +315,6 @@ let output = try pipeline.generate(
 ```
 
 > **CAUTION:** Large reference images combined with large output dimensions can exceed the 4 GB attention memory budget. The pipeline throws `Flux2AttentionBudgetError.attentionExceedsBudget` before allocating if this limit would be exceeded. The error message includes the estimated size and suggests reducing dimensions.
-
-### Observe denoising progress
-
-The `progressHandler` parameter on `generate()` and `generateTokens()` fires after each denoising step:
-
-```swift
-let output = try pipeline.generate(
-  prompts: ["A cat"],
-  height: 512,
-  width: 512,
-  numInferenceSteps: 50,
-  progressHandler: { progress in
-    print("Step \(progress.step)/\(progress.totalSteps)")
-  }
-)
-```
-
-The callback receives a `DenoiseProgress` value:
-
-| Property | Type | Description |
-| --- | --- | --- |
-| `step` | `Int` | Current step (1-based) |
-| `totalSteps` | `Int` | Total denoising steps |
-| `currentLatents` | `MLXArray` | Intermediate latent tensor (useful for live previews) |
-
-### Stream generation events (SwiftUI)
-
-Each pipeline provides `generateStream()` that wraps the callback API in an `AsyncStream<GenerationEvent>`:
-
-```swift
-let stream = pipeline.generateStream(
-  prompts: ["A cat"],
-  height: 512,
-  width: 512,
-  numInferenceSteps: 50
-)
-
-for await event in stream {
-  switch event {
-  case .progress(let progress):
-    print("Step \(progress.step)/\(progress.totalSteps)")
-  case .completed(let output):
-    // output.decoded contains the final image
-    break
-  }
-}
-```
 
 ### Pin GPU memory (wired memory)
 
@@ -454,7 +463,7 @@ For FLUX.2-klein-4B and FLUX.2-klein-9B models.
 | `modelTimestepScale` | `Float` | `0.001` | Timestep scaling factor |
 | `images` | `[MLXArray]?` | `nil` | Reference images for i2i |
 | `imageIdScale` | `Int` | `10` | Image position id scale |
-| `progressHandler` | `DenoiseProgressHandler?` | `nil` | Per-step callback |
+| `progressHandler` | `GenerationProgressHandler?` | `nil` | Per-step callback |
 | `wiredMemoryLimit` | `Int?` | `nil` | Bytes to pin in GPU RAM |
 
 **Returns:** `Flux2KleinPipelineOutput` with `packedLatents`, `decoded`, `promptEmbeds`, `textIds`, `latentIds`, `imageLatents`, `imageLatentIds`.
@@ -478,7 +487,7 @@ For the FLUX.2-dev model.
 | `images` | `[MLXArray]?` | `nil` | Reference images for i2i |
 | `imageIdScale` | `Int` | `10` | Image position id scale |
 | `maxLength` | `Int?` | `nil` | Max token length override |
-| `progressHandler` | `DenoiseProgressHandler?` | `nil` | Per-step callback |
+| `progressHandler` | `GenerationProgressHandler?` | `nil` | Per-step callback |
 | `wiredMemoryLimit` | `Int?` | `nil` | Bytes to pin in GPU RAM |
 
 **Returns:** `Flux2DevPipelineOutput` with `packedLatents`, `decoded`, `promptEmbeds`, `textIds`, `latentIds`, `imageLatents`, `imageLatentIds`.

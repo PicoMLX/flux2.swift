@@ -1,5 +1,6 @@
+import CoreGraphics
 import Foundation
-import MLX
+@preconcurrency import MLX
 import Hub
 
 public struct Flux2KleinPipelineOutput {
@@ -86,6 +87,8 @@ public final class Flux2KleinPipeline {
     )
   }
 
+  // MARK: - Synchronous API
+
   public func generate(
     prompts: [String],
     height: Int,
@@ -97,7 +100,7 @@ public final class Flux2KleinPipeline {
     modelTimestepScale: Float = 0.001,
     images: [MLXArray]? = nil,
     imageIdScale: Int = 10,
-    progressHandler: DenoiseProgressHandler? = nil,
+    progressHandler: GenerationProgressHandler? = nil,
     wiredMemoryLimit: Int? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard let promptEncoder = promptEncoder else {
@@ -127,7 +130,7 @@ public final class Flux2KleinPipeline {
 
     evalAndReleasePromptEncoder(promptEncoding: encoding, negativeEncoding: negativeEncoding)
 
-    return try generate(
+    return try generateFromEncoding(
       promptEncoding: encoding,
       negativeEncoding: negativeEncoding,
       height: height,
@@ -157,7 +160,7 @@ public final class Flux2KleinPipeline {
     modelTimestepScale: Float = 0.001,
     images: [MLXArray]? = nil,
     imageIdScale: Int = 10,
-    progressHandler: DenoiseProgressHandler? = nil,
+    progressHandler: GenerationProgressHandler? = nil,
     wiredMemoryLimit: Int? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard let promptEncoder = promptEncoder else {
@@ -220,7 +223,7 @@ public final class Flux2KleinPipeline {
 
     evalAndReleasePromptEncoder(promptEncoding: encoding, negativeEncoding: negativeEncoding)
 
-    return try generate(
+    return try generateFromEncoding(
       promptEncoding: encoding,
       negativeEncoding: negativeEncoding,
       height: height,
@@ -233,6 +236,131 @@ public final class Flux2KleinPipeline {
       imageIdScale: imageIdScale,
       progressHandler: progressHandler,
       wiredMemoryLimit: wiredMemoryLimit
+    )
+  }
+
+  // MARK: - Async streaming API
+
+  /// Launch an asynchronous generation task that streams progress and produces a CGImage.
+  ///
+  /// Returns a `GenerationHandle<CGImage>` whose `.progress` stream yields
+  /// metadata-only `GenerationProgress` events, and whose `.value()` awaits
+  /// the final CGImage result.
+  public func generateTask(
+    prompts: [String],
+    height: Int,
+    width: Int,
+    numInferenceSteps: Int,
+    numImagesPerPrompt: Int = 1,
+    latents: MLXArray? = nil,
+    guidanceScale: Float = 1.0,
+    modelTimestepScale: Float = 0.001,
+    images: [MLXArray]? = nil,
+    imageIdScale: Int = 10
+  ) throws -> GenerationHandle<CGImage> {
+    let (progressStream, progressContinuation) = AsyncThrowingStream.makeStream(
+      of: GenerationProgress.self
+    )
+
+    // Box non-Sendable values (MLXArray) for transfer into the detached task
+    let paramsBox = SendableBox((pipeline: self, latents: latents, images: images))
+
+    let task = Task.detached { [progressContinuation] () -> CGImage in
+      guard let params = paramsBox.take() else {
+        progressContinuation.finish(throwing: CancellationError())
+        throw CancellationError()
+      }
+
+      do {
+        let output = try params.pipeline.generateTaskBody(
+          prompts: prompts,
+          height: height,
+          width: width,
+          numInferenceSteps: numInferenceSteps,
+          numImagesPerPrompt: numImagesPerPrompt,
+          latents: params.latents,
+          guidanceScale: guidanceScale,
+          modelTimestepScale: modelTimestepScale,
+          images: params.images,
+          imageIdScale: imageIdScale,
+          progressContinuation: progressContinuation
+        )
+
+        let cgImage = try ImageConversion.cgImage(from: output.decoded)
+        progressContinuation.finish()
+        return cgImage
+      } catch {
+        progressContinuation.finish(throwing: error)
+        throw error
+      }
+    }
+
+    progressContinuation.onTermination = { @Sendable _ in
+      task.cancel()
+    }
+
+    return GenerationHandle(progress: progressStream, task: task)
+  }
+
+  // MARK: - Private
+
+  private func generateTaskBody(
+    prompts: [String],
+    height: Int,
+    width: Int,
+    numInferenceSteps: Int,
+    numImagesPerPrompt: Int,
+    latents: MLXArray?,
+    guidanceScale: Float,
+    modelTimestepScale: Float,
+    images: [MLXArray]?,
+    imageIdScale: Int,
+    progressContinuation: AsyncThrowingStream<GenerationProgress, Error>.Continuation
+  ) throws -> Flux2KleinPipelineOutput {
+    guard let promptEncoder = promptEncoder else {
+      throw Flux2KleinPipelineError.promptEncoderReleased
+    }
+    guard promptEncoder.tokenizer != nil else {
+      throw Flux2KleinPipelineError.missingTokenizer
+    }
+
+    let encoding = try promptEncoder.encodePrompts(
+      prompts,
+      numImagesPerPrompt: numImagesPerPrompt
+    )
+
+    let classifierFreeGuidanceEnabled = guidanceScale > 1.0 && !isDistilled
+
+    let negativeEncoding: Flux2PromptEncoding?
+    if classifierFreeGuidanceEnabled {
+      let negatives = Array(repeating: "", count: prompts.count)
+      negativeEncoding = try promptEncoder.encodePrompts(
+        negatives,
+        numImagesPerPrompt: numImagesPerPrompt
+      )
+    } else {
+      negativeEncoding = nil
+    }
+
+    evalAndReleasePromptEncoder(promptEncoding: encoding, negativeEncoding: negativeEncoding)
+
+    return try generateFromEncoding(
+      promptEncoding: encoding,
+      negativeEncoding: negativeEncoding,
+      height: height,
+      width: width,
+      numInferenceSteps: numInferenceSteps,
+      latents: latents,
+      guidanceScale: classifierFreeGuidanceEnabled ? guidanceScale : 1.0,
+      modelTimestepScale: modelTimestepScale,
+      images: images,
+      imageIdScale: imageIdScale,
+      progressHandler: { progress in
+        let result = progressContinuation.yield(progress)
+        if case .terminated = result {
+          // Consumer stopped listening
+        }
+      }
     )
   }
 
@@ -252,7 +380,7 @@ public final class Flux2KleinPipeline {
     promptEncoder = nil
   }
 
-  private func generate(
+  private func generateFromEncoding(
     promptEncoding: Flux2PromptEncoding,
     negativeEncoding: Flux2PromptEncoding?,
     height: Int,
@@ -263,7 +391,7 @@ public final class Flux2KleinPipeline {
     modelTimestepScale: Float,
     images: [MLXArray]?,
     imageIdScale: Int,
-    progressHandler: DenoiseProgressHandler? = nil,
+    progressHandler: GenerationProgressHandler? = nil,
     wiredMemoryLimit: Int? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard numInferenceSteps > 0 else {
@@ -394,7 +522,7 @@ public final class Flux2KleinPipeline {
     modelTimestepScale: Float,
     imageConditioning: (latents: MLXArray, ids: MLXArray)?,
     evalInterval: Int = 5,
-    progressHandler: DenoiseProgressHandler? = nil
+    progressHandler: GenerationProgressHandler? = nil
   ) throws -> MLXArray {
     let stepValues = scheduler.timestepsValues
     let batch = latents.dim(0)
@@ -412,6 +540,9 @@ public final class Flux2KleinPipeline {
 
     let totalSteps = stepValues.count
     for (stepIndex, step) in stepValues.enumerated() {
+      // Check for cooperative cancellation
+      try Task.checkCancellation()
+
       let timestep = MLX.full([batch], values: step).asType(current.dtype)
       var noisePred = predictNoise(
         latents: current,
@@ -447,11 +578,7 @@ public final class Flux2KleinPipeline {
         MLX.eval(current)
       }
 
-      progressHandler?(DenoiseProgress(
-        step: stepIndex + 1,
-        totalSteps: totalSteps,
-        currentLatents: current
-      ))
+      progressHandler?(GenerationProgress(step: stepIndex + 1, totalSteps: totalSteps))
     }
 
     return current
@@ -489,45 +616,7 @@ public final class Flux2KleinPipeline {
     return noisePredAll[0..., 0..<tokenCount, 0...]
   }
 
-  public func generateStream(
-    prompts: [String],
-    height: Int,
-    width: Int,
-    numInferenceSteps: Int,
-    numImagesPerPrompt: Int = 1,
-    latents: MLXArray? = nil,
-    guidanceScale: Float = 1.0,
-    modelTimestepScale: Float = 0.001,
-    images: [MLXArray]? = nil,
-    imageIdScale: Int = 10
-  ) -> AsyncStream<GenerationEvent> {
-    AsyncStream { continuation in
-      do {
-        let output = try generate(
-          prompts: prompts,
-          height: height,
-          width: width,
-          numInferenceSteps: numInferenceSteps,
-          numImagesPerPrompt: numImagesPerPrompt,
-          latents: latents,
-          guidanceScale: guidanceScale,
-          modelTimestepScale: modelTimestepScale,
-          images: images,
-          imageIdScale: imageIdScale,
-          progressHandler: { progress in
-            continuation.yield(.progress(progress))
-          }
-        )
-        continuation.yield(.completed(Flux2PipelineOutput(
-          packedLatents: output.packedLatents,
-          decoded: output.decoded
-        )))
-        continuation.finish()
-      } catch {
-        continuation.finish()
-      }
-    }
-  }
+  // MARK: - Model detection
 
   private struct ModelIndex: Decodable {
     let isDistilled: Bool?
