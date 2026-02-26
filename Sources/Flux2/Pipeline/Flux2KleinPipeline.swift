@@ -23,6 +23,7 @@ public enum Flux2KleinPipelineError: Error {
   case invalidLatentChannels(Int, Int)
   case invalidNumInferenceSteps(Int)
   case invalidImageCount(Int)
+  case promptEncoderReloadUnavailable
 }
 
 public final class Flux2KleinPipeline {
@@ -33,6 +34,12 @@ public final class Flux2KleinPipeline {
   public let isDistilled: Bool
 
   private let pipeline: Flux2Pipeline
+
+  // Retained for encoder-only reload (reloadPromptEncoder).
+  private var _snapshot: URL?
+  private var _dtype: DType?
+  private var _hiddenStateLayers: [Int]?
+  private var _maxLengthOverride: Int?
 
   public init(
     transformer: Flux2Transformer2DModel,
@@ -85,6 +92,10 @@ public final class Flux2KleinPipeline {
       promptEncoder: promptEncoder,
       isDistilled: isDistilled
     )
+    self._snapshot = snapshot
+    self._dtype = dtype
+    self._hiddenStateLayers = hiddenStateLayers
+    self._maxLengthOverride = maxLengthOverride
   }
 
   // MARK: - Synchronous API
@@ -109,7 +120,8 @@ public final class Flux2KleinPipeline {
     imageIdScale: Int = 10,
     progressHandler: GenerationProgressHandler? = nil,
     wiredMemoryLimit: Int? = nil,
-    denoiseStepCallback: DenoiseStepCallback? = nil
+    denoiseStepCallback: DenoiseStepCallback? = nil,
+    evalInterval: Int? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard let promptEncoder = promptEncoder else {
       throw Flux2KleinPipelineError.promptEncoderReleased
@@ -150,7 +162,8 @@ public final class Flux2KleinPipeline {
       images: images,
       imageIdScale: imageIdScale,
       progressHandler: progressHandler,
-      denoiseStepCallback: denoiseStepCallback
+      denoiseStepCallback: denoiseStepCallback,
+      evalInterval: evalInterval
     )
   }
 
@@ -177,7 +190,8 @@ public final class Flux2KleinPipeline {
     imageIdScale: Int = 10,
     progressHandler: GenerationProgressHandler? = nil,
     wiredMemoryLimit: Int? = nil,
-    denoiseStepCallback: DenoiseStepCallback? = nil
+    denoiseStepCallback: DenoiseStepCallback? = nil,
+    evalInterval: Int? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard let promptEncoder = promptEncoder else {
       throw Flux2KleinPipelineError.promptEncoderReleased
@@ -251,7 +265,8 @@ public final class Flux2KleinPipeline {
       images: images,
       imageIdScale: imageIdScale,
       progressHandler: progressHandler,
-      denoiseStepCallback: denoiseStepCallback
+      denoiseStepCallback: denoiseStepCallback,
+      evalInterval: evalInterval
     )
   }
 
@@ -273,7 +288,8 @@ public final class Flux2KleinPipeline {
     modelTimestepScale: Float = 0.001,
     images: [MLXArray]? = nil,
     imageIdScale: Int = 10,
-    wiredMemoryLimit: Int? = nil
+    wiredMemoryLimit: Int? = nil,
+    evalInterval: Int? = nil
   ) throws -> GenerationHandle<CGImage> {
     try generateTask(
       prompts: prompts,
@@ -286,7 +302,8 @@ public final class Flux2KleinPipeline {
       modelTimestepScale: modelTimestepScale,
       images: images,
       imageIdScale: imageIdScale,
-      wiredMemoryTicket: wiredMemoryLimit.map(Flux2WiredMemory.requestTicket(limit:))
+      wiredMemoryTicket: wiredMemoryLimit.map(Flux2WiredMemory.requestTicket(limit:)),
+      evalInterval: evalInterval
     )
   }
 
@@ -305,7 +322,8 @@ public final class Flux2KleinPipeline {
     modelTimestepScale: Float = 0.001,
     images: [MLXArray]? = nil,
     imageIdScale: Int = 10,
-    wiredMemoryTicket: WiredMemoryTicket?
+    wiredMemoryTicket: WiredMemoryTicket?,
+    evalInterval: Int? = nil
   ) throws -> GenerationHandle<CGImage> {
     let (progressStream, progressContinuation) = AsyncThrowingStream.makeStream(
       of: GenerationProgress.self
@@ -333,6 +351,7 @@ public final class Flux2KleinPipeline {
             modelTimestepScale: modelTimestepScale,
             images: params.images,
             imageIdScale: imageIdScale,
+            evalInterval: evalInterval,
             progressContinuation: progressContinuation
           )
 
@@ -375,6 +394,7 @@ public final class Flux2KleinPipeline {
     modelTimestepScale: Float,
     images: [MLXArray]?,
     imageIdScale: Int,
+    evalInterval: Int? = nil,
     progressContinuation: AsyncThrowingStream<GenerationProgress, Error>.Continuation
   ) throws -> Flux2KleinPipelineOutput {
     guard let promptEncoder = promptEncoder else {
@@ -420,7 +440,8 @@ public final class Flux2KleinPipeline {
         if case .terminated = result {
           // Consumer stopped listening
         }
-      }
+      },
+      evalInterval: evalInterval
     )
   }
 
@@ -440,6 +461,43 @@ public final class Flux2KleinPipeline {
     promptEncoder = nil
   }
 
+  /// Reload only the prompt encoder from disk, avoiding a full pipeline rebuild.
+  ///
+  /// Call this when `promptEncoder` is `nil` (released after the previous generation)
+  /// but the rest of the pipeline (transformer, VAE, scheduler) is still valid.
+  /// Requires that the pipeline was created via the convenience `init(snapshot:...)`.
+  public func reloadPromptEncoder() throws {
+    guard let snapshot = _snapshot, let dtype = _dtype,
+          let hiddenStateLayers = _hiddenStateLayers else {
+      throw Flux2KleinPipelineError.promptEncoderReloadUnavailable
+    }
+    self.promptEncoder = try Flux2KleinPromptEncoder(
+      snapshot: snapshot,
+      dtype: dtype,
+      hiddenStateLayers: hiddenStateLayers,
+      maxLengthOverride: _maxLengthOverride
+    )
+  }
+
+  /// Force-materialize all model weights so that the first denoise step isn't
+  /// penalized by lazy MLX evaluation.  Call after loading or reloading the pipeline.
+  public func evaluateWeights() {
+    var arrays: [MLXArray] = []
+    arrays.append(contentsOf: transformer.parameters().flattened().map(\.1))
+    arrays.append(contentsOf: vae.parameters().flattened().map(\.1))
+    if let promptEncoder {
+      arrays.append(contentsOf: promptEncoder.textEncoder.parameters().flattened().map(\.1))
+    }
+    if !arrays.isEmpty { MLX.eval(arrays) }
+  }
+
+  /// Force-materialize only the prompt encoder weights after an encoder-only reload.
+  public func evaluatePromptEncoderWeights() {
+    guard let promptEncoder else { return }
+    let arrays = promptEncoder.textEncoder.parameters().flattened().map(\.1)
+    if !arrays.isEmpty { MLX.eval(arrays) }
+  }
+
   private func generateFromEncoding(
     promptEncoding: Flux2PromptEncoding,
     negativeEncoding: Flux2PromptEncoding?,
@@ -452,7 +510,8 @@ public final class Flux2KleinPipeline {
     images: [MLXArray]?,
     imageIdScale: Int,
     progressHandler: GenerationProgressHandler? = nil,
-    denoiseStepCallback: DenoiseStepCallback? = nil
+    denoiseStepCallback: DenoiseStepCallback? = nil,
+    evalInterval: Int? = nil
   ) throws -> Flux2KleinPipelineOutput {
     guard numInferenceSteps > 0 else {
       throw Flux2KleinPipelineError.invalidNumInferenceSteps(numInferenceSteps)
@@ -528,6 +587,8 @@ public final class Flux2KleinPipeline {
     try scheduler.setTimesteps(numInferenceSteps: numInferenceSteps, sigmas: sigmas, mu: mu)
     scheduler.setBeginIndex(0)
 
+    let resolvedEvalInterval = evalInterval ?? (numInferenceSteps < 5 ? 1 : 5)
+
     let denoised = try self.denoise(
       latents: prepared.latents,
       latentIds: prepared.ids,
@@ -536,6 +597,7 @@ public final class Flux2KleinPipeline {
       guidanceScale: guidanceScale,
       modelTimestepScale: modelTimestepScale,
       imageConditioning: preparedImages.map { (latents: $0.latents, ids: $0.ids) },
+      evalInterval: resolvedEvalInterval,
       progressHandler: progressHandler,
       denoiseStepCallback: denoiseStepCallback
     )
