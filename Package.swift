@@ -11,11 +11,11 @@ let package = Package(
     .executable(name: "flux2-cli", targets: ["Flux2CLI"])
   ],
   dependencies: [
-    .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
+    .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.6")),
     .package(url: "https://github.com/apple/swift-argument-parser.git", .upToNextMinor(from: "1.4.0")),
     .package(
       url: "https://github.com/huggingface/swift-transformers",
-      .upToNextMinor(from: "1.1.6")
+      .upToNextMinor(from: "1.3.3")
     )
   ],
   targets: [
